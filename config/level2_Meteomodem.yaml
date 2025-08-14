@@ -2,12 +2,25 @@ setup:
     interpolation_grid_min: 0
     interpolation_grid_max: 31000
     interpolation_grid_inc: 10
-    max_gap_fill: 50
+    max_gap_fill: 0
 global_attrs:
-    title: ${main.campaign} level 2 sounding data
+    title: RAPSODI Radiosonde Measurements during ${main.campaign}, ${main.platform} (Level 2)
+    summary: "Vertical atmospheric profile, retrieved from atmospheric sounding attached to a helium filled ballon."
+    creator_name: Marius Winkler, Marius Rixen
+    creator_email: marius.winkler@mpimet.mpg.de, marius.rixen@mpimet.mpg.de
+    project: ORCESTRA, PERCUSION, BOW-TIE, PICCOLO, SCORE, MAESTRO
+    featureType: profile
+    platform: ${main.platform}
+    source: Radiosondes
+    history: "Meteomodem Eoscan Software (2.1.241218); Quality control with {package} ({version}); Level 1 processing with {package} ({version}); Level 2 processing with {package} ({version}) on {date}."
+    license: CC-BY-4.0
+    references: https://github.com/observingClouds/pysonde
+    keywords: ORCESTRA, Radiosonde Profil, Sounding, ${main.platform}
+
+#    title: ${main.campaign} level 2 sounding data
 #    source: "{input_file}"
-    version: "{version}"
-    history: "created with {package} ({version}) on {date}"
+#    version: "{version}"
+#    history: "created with {package} ({version}) on {date}"
 #    description: ???
 #    campaign_id: ${main.campaign_id}
 #    platform: ${main.platform}
@@ -84,7 +97,7 @@ variables:
         attrs:
             long_name: "indicator of vertical flight direction"
             flag_meanings: "ascending descending"
-            flag_values: "[1,0]"
+            flag_values: "[0,1]"
             valid_range: "[ 0,1 ]"
             coordinates: "launch_time"
         encodings:
@@ -148,10 +161,10 @@ variables:
         internal_varname: "latitude"
     lon:
         attrs:
-            standard_name: "latitude"
-            long_name: "latitude"
+            standard_name: "longitude"
+            long_name: "longitude"
             axis: "X"
-            units: "degrees_north"
+            units: "degrees_east"
             ancillary_variables: "N_gps m_gps"
             cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
         encodings:

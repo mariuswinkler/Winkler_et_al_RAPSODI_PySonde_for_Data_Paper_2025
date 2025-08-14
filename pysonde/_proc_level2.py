@@ -43,9 +43,18 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
     # Calculate more thermodynamical variables (used for interpolation)
     td.metpy.units.units = uni
     theta = td.calc_theta_from_T(ds["ta"], ds["p"])
-    e_s = td.calc_saturation_pressure(ds["ta"])
-    w_s = mpcalc.mixing_ratio(e_s, ds["p"].metpy.quantify())
-    w = ds["rh"].data * w_s
+
+    # ORIGINAL MetPy Method
+    #e_s = td.calc_saturation_pressure(ds["ta"])
+    #w_s = mpcalc.mixing_ratio(e_s, ds["p"].metpy.quantify())
+    #w = ds["rh"].data * w_s
+    #q = w / (1 + w)
+    
+    # CUSTOM More Accurate Method suggested by Fleur.
+    #e_s = td.calc_saturation_pressure(ds["ta"])
+    e_s = td.calc_saturation_pressure(ds["ta"], method="wagner_pruss")
+    e = ds["rh"] * e_s
+    w = td.calc_wv_mixing_ratio(ds, e)
     q = w / (1 + w)
 
     w["level"] = ds.alt.data
@@ -91,6 +100,47 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
 
 
 def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
+    """
+    Interpolates atmospheric sounding data onto a uniform vertical grid.
+
+    This function supports two interpolation methods:
+    - 'linear': Performs linear interpolation for all variables along the altitude
+      dimension, with logarithmic interpolation of pressure.
+    - 'bin' (default): Performs bin-averaging over defined altitude bins, including gap-filling.
+
+    Parameters
+    ----------
+    ds_new : xarray.Dataset
+        The input dataset to interpolate. Must contain 'altitude' and 'pressure', and
+        optionally wind, temperature, humidity, etc.
+    method : str
+        Interpolation method to use. One of ['linear', 'bin'].
+    interpolation_grid : np.ndarray
+        Target vertical grid (e.g., 1D array of altitude levels in meters).
+    sounding : object
+        Sounding object with an associated pint unit registry for handling physical units.
+    variables : iterable of tuples
+        List of (input_variable, output_variable) pairs to apply unit conversions after interpolation.
+    cfg : omegaconf.DictConfig
+        Configuration object containing setup parameters (grid resolution, max gap filling, units).
+
+    Returns
+    -------
+    ds_interp : xarray.Dataset
+        The interpolated dataset, aligned to the target altitude grid and including:
+        - All available variables interpolated or binned
+        - Pressure interpolated logarithmically (in 'linear' mode)
+        - Altitude bounds (in 'bin' mode)
+        - Consistent units using pint
+
+    Notes
+    -----
+    - In 'linear' mode, NaNs are dropped before interpolation.
+    - In 'bin' mode (default), variables are averaged within bins and short gaps are filled.
+    - Pressure interpolation in 'linear' mode uses a custom exponential fitting method
+      to preserve the physical relationship between pressure and altitude.
+    - Unit conversions are applied using pint after interpolation to match target units from config.
+    """
     if method == "linear":
         # Druck logarithmisch interpolieren
 
@@ -175,6 +225,44 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
 
 
 def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
+    """
+    Final adjustments to the interpolated sounding dataset.
+
+    This function enhances the interpolated dataset by computing derived variables,
+    applying geolocation conversions, reassigning launch time, and restoring physical
+    units. It is typically called after vertical interpolation to ensure the dataset
+    is complete and consistent.
+
+    Parameters
+    ----------
+    ds_interp : xarray.Dataset
+        The vertically interpolated dataset with variables like wind_u, wind_v, theta, etc.
+    ds : xarray.Dataset
+        The original input dataset before interpolation (used for auxiliary data).
+    ds_input : xarray.Dataset
+        A preserved copy of the original dataset before interpolation (e.g., for sorting or coordinate integrity).
+    variables : iterable
+        Variable mapping (input → output names), typically used for variable-specific unit assignments.
+    cfg : omegaconf.DictConfig
+        Configuration object containing unit definitions, thresholds, and setup parameters.
+
+    Returns
+    -------
+    ds_interp : xarray.Dataset
+        The updated dataset with:
+        - Wind speed and direction
+        - Latitude, longitude, and WGS84 altitude (if ECEF input available)
+        - Launch time as a single sounding-level variable
+        - Recomputed temperature, relative humidity, and dew point
+        - Properly assigned physical units for key thermodynamic variables
+
+    Notes
+    -----
+    - Wind direction and speed are computed from horizontal wind components.
+    - If coordinates are provided in ECEF (x, y, z), they are converted to geodetic coordinates.
+    - Temperature and RH are recalculated from interpolated theta and specific humidity.
+    - Unit handling is performed using `pint` via `xarray` integration.
+    """
     dims_2d = ["sounding", "alt"]
     dims_1d = ["alt"]
     ureg = ds["lat"].pint.units._REGISTRY
@@ -249,8 +337,9 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
     w = (ds_interp.isel(sounding=0)["specific_humidity"]) / (
         1 - ds_interp.isel(sounding=0)["specific_humidity"]
     )
-    e_s = td.calc_saturation_pressure(ds_interp.isel(sounding=0)["temperature"])
-    w_s = mpcalc.mixing_ratio(e_s, ds_interp.isel(sounding=0)["pressure"].data)
+    e_s = td.calc_saturation_pressure(ds_interp.isel(sounding=0)["temperature"], method="wagner_pruss")
+    w_s = td.calc_wv_mixing_ratio(ds_interp.isel(sounding=0), e_s)
+    #w_s = mpcalc.mixing_ratio(e_s, ds_interp.isel(sounding=0)["pressure"].data)
     relative_humidity = w / w_s * 100
 
     ds_interp["relative_humidity"] = xr.DataArray(
@@ -285,6 +374,47 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
 
 
 def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation_grid):
+    """
+    Count the number of original measurements within each vertical interpolation bin 
+    and flag how each interpolated value was obtained.
+
+    This function evaluates, for each altitude bin in the interpolated dataset, 
+    how many original measurements contributed to the interpolated values. 
+    It distinguishes between bins filled via averaging of real data and those filled 
+    via interpolation, and stores this information for both PTU (pressure, temperature, 
+    humidity) and GPS-related variables.
+
+    Parameters
+    ----------
+    ds_interp : xarray.Dataset
+        The interpolated dataset containing altitude as a dimension.
+    ds_new : xarray.Dataset
+        The pre-interpolated dataset with original measurements, including 
+        pressure and GPS data (latitude).
+    cfg : omegaconf.DictConfig
+        Configuration object with setup parameters including bin spacing and altitude range.
+    interpolation_grid : np.ndarray
+        The target vertical grid used for interpolation (usually bin centers).
+
+    Returns
+    -------
+    ds_interp : xarray.Dataset
+        Updated dataset with four new data variables:
+        - 'N_ptu': number of PTU measurements per altitude bin
+        - 'N_gps': number of GPS measurements per altitude bin
+        - 'm_ptu': method flag for PTU values
+            * 0: no data
+            * 1: value was interpolated
+            * 2: value was averaged from real data
+        - 'm_gps': same as above, for GPS variables
+
+    Notes
+    -----
+    - Altitude bins are created based on interpolation grid boundaries.
+    - `groupby_bins(...).count()` is used to determine how many measurements fall within each bin.
+    - Method flags help identify whether values are directly measured or interpolated.
+    - This is useful for quality control and metadata tracking in processed soundings.
+    """
     interpolation_bins = np.arange(
         cfg.level2.setup.interpolation_grid_min
         - cfg.level2.setup.interpolation_grid_inc / 2,
@@ -347,6 +477,49 @@ def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation
 
 
 def finalize_attrs(ds_interp, ds, cfg, file, variables):
+    """
+    Finalize metadata and attributes of the interpolated sounding dataset.
+
+    This function performs the final adjustments to `ds_interp` before exporting,
+    including:
+    - Converting launch time from numerical timestamps to datetime objects
+    - Assigning ascent/descent flag based on vertical motion
+    - Copying and formatting global attributes and variable metadata
+    - Transposing variables to ensure correct dimension order
+    - Replacing template placeholders in attribute strings
+
+    Parameters
+    ----------
+    ds_interp : xarray.Dataset
+        The interpolated sounding dataset to finalize. Assumes fields like
+        `launch_time`, `ascent_rate`, and `sounding` are present.
+    ds : xarray.Dataset
+        The original dataset before interpolation. Used to inherit attributes.
+    cfg : omegaconf.DictConfig
+        Configuration object containing global and variable-level metadata.
+    file : pathlib.Path or str
+        Path to the source file used for generating `ds_interp`.
+    variables : iterable of tuples
+        List of variable mappings (input_var, output_var) used to assign metadata.
+
+    Returns
+    -------
+    ds_interp : xarray.Dataset
+        The finalized dataset with:
+        - Converted launch time (to datetime64)
+        - Ascent/descent flag (`ascent_flag`)
+        - Fully populated global and variable attributes
+        - Correct dimension ordering
+        - Source file name stored in `attrs["source"]`
+
+    Notes
+    -----
+    - `ascent_flag` is set to 0 for descending and 1 for ascending profiles,
+      depending on which type of vertical motion dominates.
+    - Attributes with string placeholders (e.g., `{platform}`) are replaced using
+      the dataset's own attributes. If a placeholder is missing, a warning is printed.
+    - Variable attributes are assigned based on the configuration (`cfg.level2.variables`).
+    """
     import pandas as pd
     from netCDF4 import num2date
 
@@ -386,6 +559,15 @@ def finalize_attrs(ds_interp, ds, cfg, file, variables):
     # merged_conf = OmegaConf.merge(config.level2, meta_data_cfg)
     # merged_conf._set_parent(OmegaConf.merge(config, meta_data_cfg))
     ds_interp.attrs = ds.attrs
+
+    # Replace placeholders in global attributes
+    for key, value in ds_interp.attrs.items():
+        if isinstance(value, str):  # Only process string attributes
+            try:
+                ds_interp.attrs[key] = value.format(**ds_interp.attrs)
+            except KeyError as e:
+                print(f"Warning: Placeholder {e} in attribute '{key}' could not be replaced.")
+
 
     ds_interp = h.replace_global_attributes(ds_interp, cfg)
     ds_interp.attrs["source"] = str(file).split("/")[-1]

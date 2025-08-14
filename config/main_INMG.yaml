@@ -1,0 +1,10 @@
+campaign: ORCESTRA
+campaign_id: ORCESTRA
+platform: INMG
+platform_number: 1
+location: Sal, Cape Verde
+configs:
+    main: config/main_INMG.yaml  # name of this file
+    level0: config/level0_INMG.yml
+    level1: config/level1_Meteomodem.yaml
+    level2: config/level2_Meteomodem.yaml

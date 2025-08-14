@@ -149,7 +149,11 @@ class METEOMODEM(Level0):
     def read(self, cor_file, bufr_file=None, round_like_bufr=False):
         pd_snd = pd.read_csv(cor_file, delimiter="\t")
 
+        '''
         def _get_date_information_from_filename(cor_file):
+            """
+            Version 1: ORIGINAL CODE by Marius Rixen
+            """
             basename = os.path.basename(cor_file)
             helper_date1 = dt.datetime(1990, 1, 1, 0, 0, 0).strftime(
                 self.filename_fmt["file"]
@@ -180,13 +184,123 @@ class METEOMODEM(Level0):
             else:
                 date_dt = date_dt
             return date_dt
+        '''
+        
+        '''
+        def _get_date_information_from_filename(cor_file):
+            """
+            Version 2: FIXED and HARDCODED CODE by Marius Winkler
 
+            Extracts the launch date from a filename, adjusting for forecast hour shifts.
+
+            Args:
+                cor_file (str): Filename (e.g., 'SA2024090618_1.cor').
+                filename_fmt (dict): Dictionary with filename formatting rules.
+                pd_snd (xarray.Dataset or similar): Dataset containing time information.
+
+            Returns:
+                datetime.date: Corrected date.
+            """
+            basename = os.path.basename(cor_file)
+
+            # Explicitly extract YYYYMMDDhh from filename
+            date_str = basename[2:12]  # Extract characters from position 2 to 11 (YYYYMMDDhh)
+            date_fmt = "%Y%m%d%H"  # Fixed format
+
+            try:
+                # Convert extracted date to datetime object
+                date_dt = dt.datetime.strptime(date_str, date_fmt).date()
+            except ValueError as e:
+                raise ValueError(f"Error parsing date from filename '{basename}': {e}")
+
+            # Adjust for midnight forecast hour shift
+            print(f"Type of pd_snd.Time[0]: {type(pd_snd.Time[0])}, Value: {pd_snd.Time[0]}")
+
+            first_time_hour = np.round(pd_snd.Time[0] / (60 * 60))  # Convert time to hours
+            extracted_hour = int(basename[10:12])  # Extract 'hh' explicitly
+
+            if first_time_hour > 12 and extracted_hour == 0:
+                date_dt = date_dt - dt.timedelta(days=1)  # Adjust date if necessary
+
+            return date_dt
+        '''
+        
+
+        def _get_date_information_from_filename(cor_file, filename_fmt, pd_snd):
+            """
+            Version 3: FIXED CODE after review with Hauke Schulz
+
+            Extracts the launch date from a filename, adjusting for forecast hour shifts.
+
+            Parameters
+            ----------
+            cor_file : str
+                Filename (e.g., 'SA2024090618_1.cor').
+            filename_fmt : dict
+                Dictionary with filename formatting rules, e.g.,
+                {'file': '??%Y%m%d%H_?', 'datetime_fmt': '%Y%m%d%H'}.
+            pd_snd : pandas.DataFrame
+                Sounding profile with 'Time' in seconds since midnight.
+
+            Returns
+            -------
+            datetime.date
+                Corrected launch date.
+
+            Examples
+            --------
+            >>> _get_date_information_from_filename('SA2024090618_1.cor', filename_fmt, pd_snd)
+            datetime.date(2024, 9, 6)
+
+            >>> _get_date_information_from_filename('SA2024090700_1.cor', filename_fmt, pd_snd)
+            datetime.date(2024, 9, 6)
+
+            In the second example, although the file is labeled for 00 UTC on Sept 7,
+            the data shows that the launch occurred late on Sept 6 (e.g., 22:36 UTC),
+            so the corrected filename becomes:
+            'RS_ORCESTRA_INMG_L1_20240906T2236_ascent.nc'
+            """
+
+            basename = os.path.basename(cor_file)
+
+            # Create dummy date string to locate datetime substring
+            dummy_date = dt.datetime(1999, 1, 1, 12, 0)
+            dummy_filename = dummy_date.strftime(filename_fmt["file"])
+            datetime_str = dummy_date.strftime(filename_fmt["datetime_fmt"])
+            start = dummy_filename.index(datetime_str)
+            end = start + len(datetime_str)
+
+            date_str = basename[start:end]
+            date_fmt = filename_fmt["datetime_fmt"]
+
+            try:
+                date_dt = dt.datetime.strptime(date_str, date_fmt).date()
+            except ValueError as e:
+                raise ValueError(f"Error parsing date from filename '{basename}': {e}")
+
+            # Adjust for midnight forecast hour shift
+            first_time_hour = np.round(pd_snd.Time.iloc[0] / 3600)  # Convert seconds to hours
+            extracted_hour = int(date_str[-2:])  # Extract the hour from the string
+
+            if first_time_hour > 12 and extracted_hour == 0:
+                date_dt = date_dt - dt.timedelta(days=1)  # Adjust if needed
+
+            return date_dt
+
+
+
+
+        
         def _get_flighttime(seconds, date_dt):
             return dt.datetime.combine(
                 date_dt, dt.time(hour=0, minute=0)
             ) + dt.timedelta(seconds=seconds)
+        
+        # Goes with version 1 and 3
+        #date_dt = _get_date_information_from_filename(cor_file)
+        # Goes with version 3
+        date_dt = _get_date_information_from_filename(cor_file, self.filename_fmt, pd_snd)
 
-        date_dt = _get_date_information_from_filename(cor_file)
         pd_snd["flight_time"] = pd_snd.Time.apply(_get_flighttime, date_dt=date_dt)
 
         # Rename variables

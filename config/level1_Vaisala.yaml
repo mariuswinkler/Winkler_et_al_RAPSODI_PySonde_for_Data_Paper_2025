@@ -1,24 +1,16 @@
 global_attrs:
-    title: ${main.campaign} level 1 sounding data
-    location: ${main.location}
-    location_coord: "{location_coordinates}"
-    campaign_id: ${main.campaign_id}
+    title: RAPSODI Radiosonde Measurements during ${main.campaign}, ${main.platform} (Level 1)
+    summary: "Vertical atmospheric profile, retrieved from atmospheric sounding attached to a helium filled ballon."
+    creator_name: Marius Winkler, Marius Rixen
+    creator_email: marius.winkler@mpimet.mpg.de, marius.rixen@mpimet.mpg.de
+    project: ORCESTRA, PERCUSION, BOW-TIE, PICCOLO, SCORE, MAESTRO
+    featureType: profile
     platform: ${main.platform}
-    instrument: "Radiosonde RS41-SGP by Vaisala"
-    instrument_id: "Vaisala-RS"
-    time_of_launch_HHmmss: "{time_launch}"
-    date_YYYYMMDD: "{day_launch}"
-    date_YYYYMMDDTHHMM: "{date_launch}"
-    resolution: "{resolution}"
-    number_of_probe: ${meta_level0.number_of_probe}
-    sonde_type: ${meta_level0.sonde_type}
-    sonde_frequency: ${meta_level0.sonde_frequency} MHz
-    source: ${meta_level0.source}
-    doi: "10.205326/137"
-    version: "{version}"
-    history: "created with {package} ({version}) on {date}"
-    featureType: "trajectory"
-    Conventions: "CF-1.7"
+    source: Radiosondes
+    history: "Vaisala Sounding System MW41 (2.21.0.7); Quality control with {package} ({version}); Level 1 processing with {package} ({version}) on {date}."
+    license: CC-BY-4.0
+    references: https://github.com/observingClouds/pysonde
+    keywords: ORCESTRA, Radiosonde Profil, Sounding, ${main.platform}
 coordinates:
     sounding:
         dimension: ${runtime.sounding_dim}
@@ -143,7 +135,7 @@ variables:
         attrs:
             standard_name: "wind_speed"
             long_name: "wind speed"
-            units: "knots"
+            units: "m/s" #knots, m/s
             coordinates: "launch_time flight_time lon lat p"
         encodings:
             dtype: "float32"
