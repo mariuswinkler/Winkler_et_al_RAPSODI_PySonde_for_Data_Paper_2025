@@ -4,6 +4,8 @@ import platform
 import re
 import time
 from pathlib import Path, PureWindowsPath
+import numpy as np
+import xarray as xr
 
 from omegaconf import OmegaConf
 from omegaconf.errors import InterpolationKeyError
@@ -317,3 +319,36 @@ def write_dataset(ds, filename):
     # check correct units here, compare with level 1 how this is done there (link Hauke sent on Mattermost)
     ds = ds.pint.dequantify()
     ds.to_netcdf(filename, unlimited_dims=["sounding"])
+
+
+def normalize_altitude(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Make ds.coords['alt'] GPS-based and keep PTU height (if any) in ds['height_ptu'].
+    - RS41 (Vaisala): expects 'gps_height' (from GeometricHeight) and 'height' (PTU).
+    - M20 (Meteomodem): expects only 'height' which is already GPS.
+    """
+    def _nan_like_1d(ref_da: xr.DataArray) -> xr.DataArray:
+        return xr.DataArray(np.full(ref_da.shape, np.nan), dims=ref_da.dims, coords=ref_da.coords)
+
+    if "gps_height" in ds:
+        ds = ds.assign_coords(alt=("time", ds["gps_height"].values))
+        ds["height_ptu"] = ds["height"].copy() if "height" in ds else _nan_like_1d(ds["gps_height"])
+    else:
+        if "height" not in ds:
+            raise ValueError("Missing both 'gps_height' and 'height' — cannot set vertical coordinate.")
+        ds = ds.assign_coords(alt=("time", ds["height"].values))
+        ds["height_ptu"] = _nan_like_1d(ds["height"])
+
+    ds.coords["alt"].attrs.update({
+        "long_name": "Geometric altitude (GPS)",
+        "units": "m",
+        "standard_name": "altitude",
+        "comment": "RS41: MW41 GeometricHeight; M20: .cor Altitude."
+    })
+    ds["height_ptu"].attrs.update({
+        "long_name": "Geopotential height from PTU (barometric)",
+        "units": "m",
+        "standard_name": "geopotential_height",
+        "comment": "Available for RS41; NaN for M20."
+    })
+    return ds

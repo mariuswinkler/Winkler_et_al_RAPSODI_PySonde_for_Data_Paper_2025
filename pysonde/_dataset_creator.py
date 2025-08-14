@@ -38,6 +38,7 @@ the one above, e.g.
 import logging
 
 import _helpers as h
+from ._helpers import normalize_altitude
 import xarray as xr
 
 
@@ -53,6 +54,7 @@ def create_dataset(cfg):
     ds = set_global_attrs(cfg, ds)
     ds = set_coords(cfg, ds)
     ds = set_variables(cfg, ds)
+    ds = normalize_altitude(ds)
     return ds
 
 
