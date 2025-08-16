@@ -71,9 +71,10 @@ variables:
             - level
         internal_varname : "pressure"
     alt:
+        internal_varname: height
         attrs:
-            standard_name: "geopotential_height"
-            long_name: "geopotential height retrieved from PTU"
+            standard_name: "altitude"
+            long_name: "geometric altitude (GPS)"
             positive: "up"
             units: "m"
             coordinates: "launch_time flight_time lon lat p"
@@ -82,7 +83,17 @@ variables:
         coordinates:
             - sounding
             - level
-        internal_varname : "height"
+    height_ptu:
+        internal_varname: height_ptu    # does not exist for M20; code will create NaNs
+        attrs:
+            standard_name: "geopotential_height"
+            long_name: "geopotential height retrieved from PTU (not available for M20)"
+            units: "m"
+        encodings:
+            dtype: "float32"
+        coordinates:
+            - sounding
+            - level
     ta:
         attrs:
             standard_name: "air_temperature"

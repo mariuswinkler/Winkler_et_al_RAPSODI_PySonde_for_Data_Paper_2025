@@ -25,7 +25,7 @@
 # Install pysonde if not already installed
 # pip install pysonde
 
-DATASET_VERSION="RS_ORCESTRA_level2_v4.0.3.nc"
+DATASET_VERSION="RS_ORCESTRA_level2_v4.0.3_GPS.nc"
 
 BASE_PATH="/Users/marius/ownCloud/PhD/12_Orcestra_Campaign"
 CONFIG_PATH="$BASE_PATH/pysonde_for_datapaper/pysonde/config"

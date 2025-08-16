@@ -38,7 +38,11 @@ coordinates:
     alt:
         dimension: ${runtime.level_dim}
         attrs:
+            standard_name: "altitude"
+            long_name: "geometric altitude (GPS)"
             units: "m"
+            axis: "Z"
+            positive: "up"
         encodings:
             dtype: "int16"
         internal_varname: "alt"
@@ -47,8 +51,8 @@ coordinates:
 variables:
     alt:
         attrs:
-            standard_name: "geopotential_height"
-            long_name: "geopotential height retrieved from PTU"
+            standard_name: "altitude"  # was: geopotential_height
+            long_name: "geometric altitude (GPS)"
             units: "m"
             axis: "Z"
             positive: "up"
@@ -58,8 +62,22 @@ variables:
             _FillValue: False
         coordinates:
             - alt
-        internal_varname: "altitude"
-        level1_varname: "height"
+        internal_varname: "alt"      # was: "altitude"
+        # remove or ignore: level1_varname: "height"
+    height_ptu:
+        attrs:
+            standard_name: "geopotential_height"
+            long_name: "geopotential height from PTU (barometric)"
+            units: "m"
+            coordinates: "lon lat alt flight_time launch_time sounding"
+            # optional CF-ish note:
+            # cell_methods: "alt: mean (interval: 10 m comment: barometric height)"
+        encodings:
+            dtype: "float32"
+        coordinates:
+            - sounding
+            - alt
+        internal_varname: "height_ptu"
     alt_bnds:
         attrs:
             comment: "(lower bound, upper bound]"

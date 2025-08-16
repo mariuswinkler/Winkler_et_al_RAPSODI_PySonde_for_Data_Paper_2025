@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(__file__))
 import reader_helpers as rh  # noqa: E402
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-import sounding as snd  # noqa: E402
+from .. import sounding as snd
 
 
 class Level0:

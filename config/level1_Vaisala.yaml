@@ -71,9 +71,10 @@ variables:
             - level
         internal_varname : "pressure"
     alt:
+        internal_varname: gps_height      # was: height
         attrs:
-            standard_name: "geopotential_height"
-            long_name: "geopotential height retrieved from PTU"
+            standard_name: "altitude"       # was: geopotential_height
+            long_name: "geometric altitude (GPS)"
             positive: "up"
             units: "m"
             coordinates: "launch_time flight_time lon lat p"
@@ -82,7 +83,17 @@ variables:
         coordinates:
             - sounding
             - level
-        internal_varname : "height"
+    height_ptu:
+        internal_varname: height          # keep PTU (barometric) height here
+        attrs:
+            standard_name: "geopotential_height"
+            long_name: "geopotential height retrieved from PTU"
+            units: "m"
+        encodings:
+            dtype: "float32"
+        coordinates:
+            - sounding
+            - level
     ta:
         attrs:
             standard_name: "air_temperature"
