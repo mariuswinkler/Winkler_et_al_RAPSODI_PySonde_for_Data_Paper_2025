@@ -34,42 +34,46 @@ global_attrs:
 coordinates:
     sounding:
         dimension: ${runtime.sounding_dim}
+        attrs:
+            units: ""
         internal_varname: "sounding"
     alt:
         dimension: ${runtime.level_dim}
         attrs:
-            units: "m"
-        encodings:
-            dtype: "int16"
-        internal_varname: "alt"
-    nv:
-        dimension: 2
-variables:
-    alt:
-        attrs:
-            standard_name: "geopotential_height"
-            long_name: "geopotential height retrieved from PTU"
+            standard_name: "altitude"
+            long_name: "geometric altitude (GPS)"
             units: "m"
             axis: "Z"
             positive: "up"
-            bounds: "alt_bnds"
         encodings:
-            dtype: "int8"
-            _FillValue: False
-        coordinates:
-            - alt
-        internal_varname: "altitude"
-        level1_varname: "height"
-    alt_bnds:
+            dtype: "float32"
+        internal_varname: "alt"
+variables:
+    alt:
         attrs:
-            comment: "(lower bound, upper bound]"
+            standard_name: "altitude"
+            long_name: "altitude height above reference ellipsoid (WGS84)"
+            units: "m"
+            axis: "Z"
+            positive: "up"
         encodings:
-            dtype: "int8"
+            dtype: "float32"
             _FillValue: False
         coordinates:
             - alt
-            - nv
-        internal_varname: "alt_bnds"
+        internal_varname: "alt"
+    height_ptu:
+        attrs:
+            standard_name: "geopotential_height"
+            long_name: "geopotential height from PTU (barometric)"
+            units: "m"
+            coordinates: "lon lat alt flight_time launch_time sounding"
+        encodings:
+            dtype: "float32"
+        coordinates:
+            - sounding
+            - alt
+        internal_varname: "height_ptu"
     launch_time:
         attrs:
             standard_name: "time"
@@ -150,7 +154,7 @@ variables:
             standard_name: "latitude"
             long_name: "latitude"
             axis: "Y"
-            units: "degrees_north"
+            units: "degree_north"
             ancillary_variables: "N_gps m_gps"
             cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
         encodings:
@@ -164,7 +168,7 @@ variables:
             standard_name: "longitude"
             long_name: "longitude"
             axis: "X"
-            units: "degrees_east"
+            units: "degree_east"
             ancillary_variables: "N_gps m_gps"
             cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
         encodings:
@@ -190,7 +194,7 @@ variables:
     ta:
         attrs:
             standard_name: "air_temperature"
-            long_name: "dry bulb temperature"
+            long_name: "air temperature"
             units: "K"
             coordinates: "lon lat alt flight_time launch_time sounding"
             cell_methods: "alt: point (derived from averaged theta)"
@@ -259,7 +263,7 @@ variables:
         attrs:
             standard_name: "humidity_mixing_ratio"
             long_name: "water vapor mixing ratio"
-            units: "kg/kg"
+            units: "1"
             ancillary_variables: "N_ptu"
             cell_methods: "alt: point (derived from averaged q)"
             coordinates: "launch_time flight_time lon lat p"
@@ -287,7 +291,7 @@ variables:
         attrs:
             standard_name: "specific_humidity"
             long_name: "specific humidity"
-            units: "kg/kg"
+            units: "1"
             ancillary_variables: "N_ptu m_ptu"
             cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
             coordinates: "launch_time flight_time lon lat p"

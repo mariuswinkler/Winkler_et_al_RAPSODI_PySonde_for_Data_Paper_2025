@@ -17,12 +17,13 @@ from .readers.readers import pysondeL1
 
 
 def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
+    # Wind components from direction + speed
     u, v = mh.get_wind_components(ds.wdir, ds.wspd)
     ds["u"] = xr.DataArray(u.data, dims=["level"])
     ds["v"] = xr.DataArray(v.data, dims=["level"])
 
+    # Optional: Cartesian coordinates if WGS84 altitude is present
     if "alt_WGS84" in ds.keys():
-        # Convert lat, lon, alt to cartesian coordinates
         ecef = pyproj.Proj(proj="geocent", ellps="WGS84", datum="WGS84")
         lla = pyproj.Proj(proj="latlong", ellps="WGS84", datum="WGS84")
         x, y, z = pyproj.transform(
@@ -40,44 +41,52 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
             "No WGS84 altitude could be found. The averaging of the position might be faulty especially at the 0 meridian and close to the poles"
         )
 
-    # Calculate more thermodynamical variables (used for interpolation)
+    # --- Make 'alt' the vertical dimension for the entire dataset ---
+    if "level" in ds.dims:
+        # ensure 'alt' is a coordinate (if it's currently a data_var)
+        if "alt" in ds and "alt" not in ds.coords:
+            ds = ds.set_coords("alt")
+
+        # preferred path: swap_dims when 'alt' is a 1-D coord over 'level'
+        if "alt" in ds.coords and ds["alt"].dims == ("level",):
+            ds = ds.swap_dims({"level": "alt"})
+        else:
+            # fallback: if an 'alt' data_var conflicts, rename it temporarily, then rename the dim
+            if "alt" in ds.variables and "alt" not in ds.dims:
+                ds = ds.rename({"alt": "alt_var"})
+            ds = ds.rename({"level": "alt"})
+    # ----------------------------------------------------------------
+
+    # Thermodynamics on the dataset now using 'alt' as the vertical dim
     td.metpy.units.units = uni
     theta = td.calc_theta_from_T(ds["ta"], ds["p"])
 
-    # ORIGINAL MetPy Method
-    #e_s = td.calc_saturation_pressure(ds["ta"])
-    #w_s = mpcalc.mixing_ratio(e_s, ds["p"].metpy.quantify())
-    #w = ds["rh"].data * w_s
-    #q = w / (1 + w)
-    
-    # CUSTOM More Accurate Method suggested by Fleur.
-    #e_s = td.calc_saturation_pressure(ds["ta"])
+    # Saturation vapor pressure (Wagner–Pruss), mixing ratio and specific humidity
     e_s = td.calc_saturation_pressure(ds["ta"], method="wagner_pruss")
-    e = ds["rh"] * e_s
-    w = td.calc_wv_mixing_ratio(ds, e)
-    q = w / (1 + w)
+    e   = ds["rh"] * e_s
+    w   = td.calc_wv_mixing_ratio(ds, e)
+    q   = w / (1 + w)
 
-    w["level"] = ds.alt.data
-    w = w.rename({"level": "alt"})
-    w = w.expand_dims({"sounding": 1})
-    q["level"] = ds.alt.data
-    q = q.rename({"level": "alt"})
-    q = q.expand_dims({"sounding": 1})
-    theta["level"] = ds.alt.data
-    theta = theta.rename({"level": "alt"})
+    # Add 'sounding' dim for derived fields to match Level-2 expectations
+    w     = w.expand_dims({"sounding": 1})
+    q     = q.expand_dims({"sounding": 1})
     theta = theta.expand_dims({"sounding": 1})
 
-    ds = ds.rename_vars({"alt": "altitude"})
-    ds = ds.rename({"level": "alt"})
-    ds["alt"] = ds.altitude.data
+    # Optional: drop non-essential coords to keep ds_new clean (alt remains as a dimension)
     ds = ds.reset_coords()
     ds = ds.expand_dims({"sounding": 1})
 
-    ds_new = xr.Dataset()  # ds.copy()
-    ds_new["mr"] = w.reset_coords(drop=True)
-    ds_new["theta"] = theta.reset_coords(drop=True)
+    # New dataset holding fields needed for interpolation & outputs
+    ds_new = xr.Dataset()
+    ds_new["mr"]                = w.reset_coords(drop=True)
+    ds_new["theta"]             = theta.reset_coords(drop=True)
     ds_new["specific_humidity"] = q.reset_coords(drop=True)
 
+    # NEW: carry PTU geopotential height into L2 (NaNs for Meteomodem)
+    if "height_ptu" in ds:
+        ds_new["height_ptu"] = ds["height_ptu"]
+
+    # Carry over remaining variables from ds (that aren't already present)
     for var in ds.data_vars:
         if var not in ds_new.data_vars and var not in ds_new.coords:
             try:
@@ -86,142 +95,118 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
                 logging.warning(f"Variable {var} not found.")
                 pass
 
+    # Final variable renames according to Level-2 'variables' mapping
     for variable_name_in, variable_name_out in variables:
         try:
             ds_new = ds_new.rename({variable_name_in: variable_name_out})
-            ds_new[variable_name_out].attrs = ds[
-                variable_name_in
-            ].attrs  # Copy attributes from input
+            # copy attrs from source if present in ds
+            if variable_name_in in ds:
+                ds_new[variable_name_out].attrs = ds[variable_name_in].attrs
         except (ValueError, KeyError):
             logging.warning(f"Variable {variable_name_in} not found.")
             pass
 
     return ds, ds_new
 
-
 def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
     """
-    Interpolates atmospheric sounding data onto a uniform vertical grid.
-
-    This function supports two interpolation methods:
-    - 'linear': Performs linear interpolation for all variables along the altitude
-      dimension, with logarithmic interpolation of pressure.
-    - 'bin' (default): Performs bin-averaging over defined altitude bins, including gap-filling.
+    Interpolate/bin Level-2 dataset along GPS altitude 'alt'.
 
     Parameters
     ----------
-    ds_new : xarray.Dataset
-        The input dataset to interpolate. Must contain 'altitude' and 'pressure', and
-        optionally wind, temperature, humidity, etc.
-    method : str
-        Interpolation method to use. One of ['linear', 'bin'].
+    ds_new : xr.Dataset
+        Output of prepare_data_for_interpolation(), with 'alt' as vertical dim.
+    method : {"linear","bin"}
+        Interpolation strategy.
     interpolation_grid : np.ndarray
-        Target vertical grid (e.g., 1D array of altitude levels in meters).
+        Target altitude grid (centers) in meters.
     sounding : object
-        Sounding object with an associated pint unit registry for handling physical units.
-    variables : iterable of tuples
-        List of (input_variable, output_variable) pairs to apply unit conversions after interpolation.
+        Sounding object (for unitregistry etc).
+    variables : iterable[(in_name, out_name)]
+        Variable rename mapping for outputs.
     cfg : omegaconf.DictConfig
-        Configuration object containing setup parameters (grid resolution, max gap filling, units).
+        Full merged config.
 
     Returns
     -------
-    ds_interp : xarray.Dataset
-        The interpolated dataset, aligned to the target altitude grid and including:
-        - All available variables interpolated or binned
-        - Pressure interpolated logarithmically (in 'linear' mode)
-        - Altitude bounds (in 'bin' mode)
-        - Consistent units using pint
-
-    Notes
-    -----
-    - In 'linear' mode, NaNs are dropped before interpolation.
-    - In 'bin' mode (default), variables are averaged within bins and short gaps are filled.
-    - Pressure interpolation in 'linear' mode uses a custom exponential fitting method
-      to preserve the physical relationship between pressure and altitude.
-    - Unit conversions are applied using pint after interpolation to match target units from config.
+    ds_interp : xr.Dataset
     """
+    import numpy as np
+    import xarray as xr
+    from omegaconf.errors import ConfigAttributeError
+
     if method == "linear":
-        # Druck logarithmisch interpolieren
+        # --- linear interpolation on numeric 'alt' ---
+        # Ensure we drop NaNs for a clean 1D interpolation
+        ds_lin = ds_new.dropna(dim="alt", how="any")
+        ds_interp = ds_lin.interp(alt=interpolation_grid)
 
+        # Logarithmic pressure interpolation to preserve p(z) profile
         pres_int_p = ds_new.pressure.pint.to("hPa").values[0]
-        pres_int_a = ds_new.altitude.pint.to("m").values[0]
+        # 'alt' may be a coordinate without pint; handle both cases
+        try:
+            pres_int_a = ds_new["alt"].pint.to("m").values[0]
+        except Exception:
+            pres_int_a = ds_new["alt"].values[0] * sounding.unitregistry("m")
 
-        ds_new = ds_new.dropna(dim="alt", how="any")
-        # subset=output_variables,
-        ds_interp = ds_new.interp(alt=interpolation_grid)
-
-        # Logarithmic Pressure Interpolation
-        # """
         dims_1d = ["alt"]
         coords_1d = {"alt": ds_interp.alt.data}
-
         alt_out = ds_interp.alt.values
-
         interp_pres = mh.pressure_interpolation(
             pres_int_p, pres_int_a, alt_out
         ) * sounding.unitregistry("hPa")
-
-        ds_interp["pressure"] = xr.DataArray(
-            interp_pres, dims=dims_1d, coords=coords_1d
-        )
+        ds_interp["pressure"] = xr.DataArray(interp_pres, dims=dims_1d, coords=coords_1d)
         ds_interp["pressure"] = ds_interp["pressure"].expand_dims({"sounding": 1})
-        # """
 
+        # Unit harmonization for other variables
         for var_in, var_out in variables:
             try:
-                ds_interp[var_out] = ds_interp[var_out].pint.quantify(
-                    ds_new[var_out].pint.units
-                )
-                ds_interp[var_out] = ds_interp[var_out].pint.to(
-                    cfg.level2.variables[var_in].attrs.units
-                )
-            except (KeyError, ValueError, ConfigAttributeError) as e:
-                logging.warning(
-                    f"Likely no unit has been found for {var_out}, raising {e}"
-                )
+                ds_interp[var_out] = ds_interp[var_out].pint.quantify(ds_new[var_out].pint.units)
+                ds_interp[var_out] = ds_interp[var_out].pint.to(cfg.level2.variables[var_in].attrs.units)
+            except (KeyError, ValueError, ConfigAttributeError):
+                # some vars may be unitless or absent
                 pass
 
     elif method == "bin":
+        # --- bin-mean on alt using numeric labels (no pandas.Interval left) ---
         interpolation_bins = np.arange(
-            cfg.level2.setup.interpolation_grid_min
-            - cfg.level2.setup.interpolation_grid_inc / 2,
-            cfg.level2.setup.interpolation_grid_max
-            + cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_min - cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_max + cfg.level2.setup.interpolation_grid_inc / 2,
             cfg.level2.setup.interpolation_grid_inc,
         )
-        # Workaround for issue https://github.com/pydata/xarray/issues/6995
-        ds_new["flight_time"] = ds_new.flight_time.astype(int)
+
+        # Workaround for xarray#6995 (object dtype time issues)
+        if "flight_time" in ds_new:
+            ds_new["flight_time"] = ds_new.flight_time.astype(int)
+
+        # Use labels=interpolation_grid so resulting coord is numeric (bin centers)
         ds_interp = ds_new.groupby_bins(
-            "altitude",
+            "alt",
             interpolation_bins,
             labels=interpolation_grid,
             restore_coord_dims=True,
         ).mean()
-        ds_interp = ds_interp.transpose()
-        ds_interp = ds_interp.rename({"altitude_bins": "alt"})
 
-        # Create bounds variable
+        # xarray returns 'alt_bins' -> rename to 'alt' (numeric coord already)
+        ds_interp = ds_interp.transpose()
+        ds_interp = ds_interp.rename({"alt_bins": "alt"})
+
+        # Create bounds variable (lower, upper] per CF-ish convention
         ds_interp["alt_bnds"] = xr.DataArray(
             np.array([interpolation_bins[:-1], interpolation_bins[1:]]).T,
             dims=["alt", "nv"],
             coords={"alt": ds_interp.alt.data},
         )
 
-        ds_interp["launch_time"] = ds_new["launch_time"]
+        # carry launch_time forward
+        if "launch_time" in ds_new:
+            ds_interp["launch_time"] = ds_new["launch_time"]
 
-        ## Interpolation NaN
-        units = {v: ds_interp[v].pint.units for v in ds_interp.data_vars}
-        ds_interp = ds_interp.interpolate_na(
-            "alt", max_gap=cfg.level2.setup.max_gap_fill, use_coordinate=True
-        )
-        ds_interp = ds_interp.pint.quantify(
-            units
-        )  # pint.interpolate_na does not support max_gap yet and looses units
-
-        ds_interp["flight_time"] = ds_interp.flight_time.astype("datetime64[ns]")
+    else:
+        raise ValueError(f"Unknown interpolation method: {method}")
 
     return ds_interp
+
 
 
 def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):

@@ -5,7 +5,7 @@ import logging
 import os
 from pathlib import Path
 
-import _dataset_creator as dc
+from . import _dataset_creator as dc
 import _helpers as h
 import numpy as np
 import pandas as pd
@@ -331,7 +331,7 @@ class Sounding:
 
 
     def collect_config(self, config, level):
-        level_dims = {1: "flight_time", 2: "altitude"}
+        level_dims = {1: "flight_time", 2: "alt"}
         runtime_cfg = OmegaConf.create(
             {
                 "runtime": {
@@ -400,44 +400,52 @@ class Sounding:
                 ds[k].encoding["dtype"] = coord_dtype
         return ds, unset_coords
 
+
     def create_dataset(self, config, level=1):
         merged_conf = self.collect_config(config, level)
         ds = dc.create_dataset(merged_conf)
 
-        ds.flight_time.data = xr.DataArray(
-            [self.profile.flight_time], dims=["sounding", "level"]
-        )
-
         # Fill dataset with data
         unset_vars = {}
 
+        # Ensure every profile var has a 'sounding' dim for consistent broadcasting
         for var in self.profile.data_vars:
             if var == "alt_bnds":
                 continue
             if "sounding" not in self.profile[var].dims:
                 self.profile[var] = self.profile[var].expand_dims({"sounding": 1})
+
         for k in ds.data_vars.keys():
             try:
                 int_var = config[f"level{level}"].variables[k].internal_varname
             except ConfigAttributeError:
                 logging.debug(f"{k} does not seem to have an internal varname")
                 continue
-            if int_var not in self.profile.keys():
-                unset_vars[k] = int_var
-                continue
+
             dims = ds[k].dims
+
+            # Special cases handled as before
             if k == "launch_time":
                 try:
                     ds[k].data = self.profile[int_var].values
                 except KeyError:
                     unset_vars[k] = int_var
-                    pass
                 continue
             elif k == "platform":
                 continue  # will be set at later stage
+
+            # ------------- MOD: robust handling if the source is missing -------------
+            if int_var not in self.profile.keys():
+                # Create NaNs that EXACTLY match the target variable's dims
+                shape = tuple(ds.sizes[d] for d in ds[k].dims)
+                ds[k].data = np.full(shape, np.nan, dtype=float)
+                continue
+            # -------------------------------------------------------------------------
+
+            # Source exists: assign with units handling and dim ordering as before
             if self.isquantity(self.profile[int_var]):
                 data = (
-                    self.profile[int_var].pint.to(ds[k].attrs["units"]).pint.magnitude
+                    self.profile[int_var].pint.to(ds[k].attrs.get("units", "")).pint.magnitude
                 )
                 if len(dims) > 1 and "sounding" == dims[1]:
                     ds[k].data = np.array(data).T
@@ -461,7 +469,12 @@ class Sounding:
             _cfg = h.remove_missing_cfg(merged_conf["global_attrs"])
             ds.attrs = _cfg
 
+        # --- NEW: ensure 'alt' is a coordinate if present as a variable ---
+        if "alt" in ds.data_vars and "alt" not in ds.coords:
+            ds = ds.set_coords("alt")
+
         self.dataset = ds
+
 
 
     def get_direction(self):

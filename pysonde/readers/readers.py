@@ -17,7 +17,7 @@ sys.path.append(os.path.dirname(__file__))
 import reader_helpers as rh  # noqa: E402
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-import sounding as snd  # noqa: E402
+from .. import sounding as snd
 
 
 class Level0:
@@ -355,28 +355,40 @@ class pysondeL1:
     """
     Reader for level 1 data created with pysonde
     """
-
+    # readers.py — inside class pysondeL1
     def __init__(self, cfg):
-        """Configure reader"""
-        # Configure, which values need to be read and how they are named
-        self.variable_name_mapping_input = self._get_variable_name_mapping(
-            cfg["level1"]
-        )
-        self.variable_name_mapping_output = self._get_variable_name_mapping(
-            cfg["level2"]
-        )
+        # Prefer explicit override from main config
+        try:
+            override_in  = cfg.readers.netcdf.get("variable_name_mapping_input", None)
+        except Exception:
+            override_in = None
+        try:
+            override_out = cfg.readers.netcdf.get("variable_name_mapping_output", None)
+        except Exception:
+            override_out = None
+
+        if override_in is not None:
+            self.variable_name_mapping_input = dict(override_in)
+        else:
+            self.variable_name_mapping_input = self._get_variable_name_mapping(cfg["level1"])
+
+        if override_out is not None:
+            self.variable_name_mapping_output = dict(override_out)
+        else:
+            self.variable_name_mapping_output = self._get_variable_name_mapping(cfg["level2"])
+
 
     def _get_variable_name_mapping(self, cfg_lev):
         variables = cfg_lev["variables"]
-
         mapping_dict = {}
         for var_ext, var_dict in variables.items():
-            try:
-                var_int = var_dict["internal_varname"]
-            except KeyError:
-                logging.error("Internal varname is not defined for var {var_ext}.")
+            var_int = var_dict.get("internal_varname", None)
+            if var_int is None:
+                logging.error(f"Internal varname is not defined for var {var_ext}. Skipping.")
+                continue
             mapping_dict[var_ext] = var_int
         return mapping_dict
+
 
     def read(self, L1_file):
         """Read level 1 file"""

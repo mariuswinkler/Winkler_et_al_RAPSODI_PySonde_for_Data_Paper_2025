@@ -229,25 +229,27 @@ def get_sounding_metadata(file, keys):
     return sounding_meta_dict
 
 
+# reader_helpers.py — replace rename_variables with a safer version
 def rename_variables(sounding, variable_dict):
-    """Rename variables in sounding
-    according to key, value pairs in
-    variable dict
-    """
-    if isinstance(sounding, xr.core.dataset.Dataset):
-        vars = list(sounding.data_vars.keys())
-        vars.extend(list(sounding.coords.keys()))
-    else:
-        vars = sounding.columns
-    rename_dict = {}
-    for var in vars:
-        if var in variable_dict.keys():
-            rename_dict[var] = variable_dict[var]
+    if not variable_dict:
+        return sounding
 
     if isinstance(sounding, xr.core.dataset.Dataset):
-        sounding = sounding.rename(rename_dict)
+        present = set(list(sounding.data_vars.keys()) + list(sounding.coords.keys()))
+        rename_dict = {}
+        for old, new in variable_dict.items():
+            if old in present:
+                # skip if the target name already exists AND it's a different variable
+                if new in present and new != old:
+                    continue
+                rename_dict[old] = new
+        if rename_dict:
+            sounding = sounding.rename(rename_dict)
     else:
-        sounding = sounding.rename(columns=rename_dict)
+        cols = list(sounding.columns)
+        rename_dict = {old: new for old, new in variable_dict.items() if old in cols}
+        if rename_dict:
+            sounding = sounding.rename(columns=rename_dict)
 
     return sounding
 

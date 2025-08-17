@@ -4,6 +4,8 @@ import platform
 import re
 import time
 from pathlib import Path, PureWindowsPath
+import numpy as np
+import xarray as xr
 
 from omegaconf import OmegaConf
 from omegaconf.errors import InterpolationKeyError
@@ -317,3 +319,73 @@ def write_dataset(ds, filename):
     # check correct units here, compare with level 1 how this is done there (link Hauke sent on Mattermost)
     ds = ds.pint.dequantify()
     ds.to_netcdf(filename, unlimited_dims=["sounding"])
+
+
+def _first_1d_dim(da: xr.DataArray) -> str:
+    # Prefer a time-like dimension if present
+    for cand in ("time", "datetime"):
+        if cand in da.dims:
+            return cand
+    # Fallback to the first dim
+    return da.dims[0]
+
+def normalize_altitude(ds: xr.Dataset) -> xr.Dataset:
+    """
+    Set ds.coords['alt'] to GPS-based height and keep PTU height in ds['height_ptu'].
+    Robust to cases where config mapping didn't rename variables:
+      - GPS candidates: 'gps_height', 'GeometricHeight', 'Altitude'
+      - PTU candidates: 'height', 'Height'
+    """
+    # Candidates
+    gps_keys = [k for k in ("gps_height", "GeometricHeight", "Altitude") if k in ds.variables]
+    ptu_keys = [k for k in ("height", "Height") if k in ds.variables]
+
+    gps_da = ds[gps_keys[0]] if gps_keys else None
+    ptu_da = ds[ptu_keys[0]] if ptu_keys else None
+
+    if gps_da is not None:
+        dim = _first_1d_dim(gps_da)
+        ds = ds.assign_coords(alt=(dim, gps_da.values))
+        if ptu_da is not None:
+            ds["height_ptu"] = ptu_da.copy()
+        else:
+            ds["height_ptu"] = xr.full_like(gps_da, np.nan).rename(None)
+            ds["height_ptu"] = ds["height_ptu"].rename({dim: dim})
+    elif ptu_da is not None:
+        # Meteomodem path: 'height' already GPS; use it and set PTU as NaN
+        dim = _first_1d_dim(ptu_da)
+        ds = ds.assign_coords(alt=(dim, ptu_da.values))
+        ds["height_ptu"] = xr.full_like(ptu_da, np.nan)
+    else:
+        # As a last resort, try coordinate names (some readers may have put them as coords)
+        for name in ("gps_height", "GeometricHeight", "Altitude"):
+            if name in ds.coords:
+                da = ds.coords[name]
+                dim = _first_1d_dim(da)
+                ds = ds.assign_coords(alt=(dim, da.values))
+                ds["height_ptu"] = xr.full_like(da, np.nan)
+                break
+        else:
+            # Still nothing: give a clearer error with available keys
+            raise ValueError(
+                "normalize_altitude: could not find GPS or PTU height.\n"
+                f"Available variables: {list(ds.variables)}\n"
+                f"Available coords: {list(ds.coords)}\n"
+                "Expected one of GPS keys ['gps_height','GeometricHeight','Altitude'] "
+                "or PTU keys ['height','Height']."
+            )
+
+    # Attributes
+    ds.coords["alt"].attrs.update({
+        "long_name": "Geometric altitude (GPS)",
+        "units": "m",
+        "standard_name": "altitude",
+        "comment": "RS41: MW41 GeometricHeight (or Altitude fallback); M20: .cor Altitude via 'height'."
+    })
+    ds["height_ptu"].attrs.update({
+        "long_name": "Geopotential height from PTU (barometric)",
+        "units": "m",
+        "standard_name": "geopotential_height",
+        "comment": "Available for RS41 when PTU ('Height') is present; NaN otherwise."
+    })
+    return ds

@@ -14,7 +14,7 @@ global_attrs:
 coordinates:
     sounding:
         dimension: ${runtime.sounding_dim}
-        internal_varname : "sounding"
+        internal_varname: "sounding"
     level:
         attrs:
             long_name: "sounding height"
@@ -70,10 +70,21 @@ variables:
             - sounding
             - level
         internal_varname : "pressure"
-    alt:
+    height_ptu:
+        internal_varname: height          # keep PTU (barometric) height here
         attrs:
             standard_name: "geopotential_height"
             long_name: "geopotential height retrieved from PTU"
+            units: "m"
+        encodings:
+            dtype: "float32"
+        coordinates:
+            - sounding
+            - level
+    alt:
+        attrs:
+            standard_name: "altitude"
+            long_name: "altitude height above reference ellipsoid (WGS84)"
             positive: "up"
             units: "m"
             coordinates: "launch_time flight_time lon lat p"
@@ -82,11 +93,11 @@ variables:
         coordinates:
             - sounding
             - level
-        internal_varname : "height"
+        internal_varname : "altitude_WGS84"
     ta:
         attrs:
             standard_name: "air_temperature"
-            long_name: "dry bulb temperature"
+            long_name: "air temperature"
             units: "K"
             coordinates: "launch_time flight_time lon lat p"
         encodings:
@@ -123,7 +134,7 @@ variables:
         attrs:
             standard_name: "humidity_mixing_ratio"
             long_name: "water vapor mixing ratio"
-            units: "kg/kg"
+            units: "1"
             coordinates: "launch_time flight_time lon lat p"
         encodings:
             dtype: "float32"
@@ -135,7 +146,7 @@ variables:
         attrs:
             standard_name: "wind_speed"
             long_name: "wind speed"
-            units: "m/s" #knots, m/s
+            units: "m/s"
             coordinates: "launch_time flight_time lon lat p"
         encodings:
             dtype: "float32"
@@ -160,7 +171,7 @@ variables:
             standard_name: "latitude"
             long_name: "latitude"
             axis: "Y"
-            units: "degrees_north"
+            units: "degree_north"
         encodings:
             dtype: "float32"
         coordinates:
@@ -172,7 +183,7 @@ variables:
             standard_name: "longitude"
             long_name: "longitude"
             axis: "X"
-            units: "degrees_east"
+            units: "degree_east"
         encodings:
             dtype: "float32"
         coordinates:
