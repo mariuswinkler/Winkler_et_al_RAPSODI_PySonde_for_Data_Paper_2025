@@ -8,3 +8,10 @@ configs:
     level0: config/level0_INMG.yml
     level1: config/level1_Meteomodem.yaml
     level2: config/level2_Meteomodem.yaml
+
+
+readers:
+  netcdf:
+    variable_name_mapping_input:
+      p: p
+      pressure: pressure

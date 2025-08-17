@@ -1,5 +1,5 @@
 #!/bin/bash
-# last usage: 10.08.2025
+# last usage: 16.08.2025
 
 # Script: 01_reprocess_win.sh
 #
@@ -25,7 +25,7 @@
 # Install pysonde if not already installed
 # pip install pysonde
 
-DATASET_VERSION="RS_ORCESTRA_level2_v4.0.3_GPS.nc"
+DATASET_VERSION="RS_ORCESTRA_level2_v4.0.4.nc"
 
 BASE_PATH="/Users/marius/ownCloud/PhD/12_Orcestra_Campaign"
 CONFIG_PATH="$BASE_PATH/pysonde_for_datapaper/pysonde/config"

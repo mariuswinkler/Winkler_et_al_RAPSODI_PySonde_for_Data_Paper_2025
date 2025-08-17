@@ -19,7 +19,6 @@ sync_sounding_items:
     - Up
     - Altitude
     - Dropping
-    - GeometricHeight
 radiosondes_sounding_items:
     - Frequency
     - SerialNbr
@@ -39,8 +38,7 @@ dictionary_input: # variable_name_in_file: variable_name_in_software
     "Longitude" : "longitude"
     "SerialNbr" : "number_of_probe"
     "Frequency" : "sonde_frequency"
-    "GeometricHeight": "gps_height"    # GPS (geometric)
-    "Altitude": "gps_altitude_raw"  # ellipsoidal, for diagnostics
+    "Altitude": "altitude_WGS84"
 input_units:  # data units in radiosonde files (mwx)
     "pressure" : "hPa"
     "temperature" : "K"
