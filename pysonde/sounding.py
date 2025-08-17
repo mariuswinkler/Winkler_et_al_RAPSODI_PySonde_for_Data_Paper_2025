@@ -35,46 +35,6 @@ class Sounding:
         self.meta_data = meta_data
         self.config = config
         self.unitregistry = ureg
-    '''
-    def split_by_direction(self, method="maxHeight"):
-        """Split sounding into ascending and descending branch"""
-        # Simple approach
-        sounding_ascent = copy.deepcopy(self)
-        sounding_descent = copy.deepcopy(self)
-        sounding_ascent.profile = self.profile.loc[self.profile.Dropping == 0]
-        sounding_descent.profile = self.profile.loc[self.profile.Dropping == 1]
-
-        # Bugfix 17
-        if method == "maxHeight":
-            for s, (sounding, func) in enumerate(
-                zip(
-                    (sounding_ascent.profile, sounding_descent.profile),
-                    (np.greater_equal, np.less_equal),
-                )
-            ):
-                if len(sounding) < 2:
-                    continue
-                window_size = 5
-                smoothed_heights = np.convolve(
-                    sounding.height, np.ones((window_size,)) / window_size, mode="valid"
-                )
-                if not np.all(func(np.gradient(smoothed_heights), 0)):
-                    total = len(sounding.height)
-                    nb_diff = total - np.sum(func(np.gradient(sounding.height), 0))
-                    logging.warning(
-                        "Of {} observations, {} observations have an inconsistent "
-                        "sounding direction".format(total, nb_diff)
-                    )
-                    # Find split time for ascending and descending sounding by maximum height
-                    # instead of relying on Dropping variable
-                    logging.warning(
-                        "Calculate bursting of balloon from maximum geopotential height"
-                    )
-                    idx_max_hgt = np.argmax(self.profile.height)
-
-                    sounding_ascent.profile = self.profile.iloc[0 : idx_max_hgt + 1]
-                    sounding_descent.profile = self.profile.iloc[idx_max_hgt + 1 :]
-    '''
 
     def split_by_direction(self, method="maxHeight"):
         """Split sounding into ascending and descending branch"""
@@ -131,27 +91,6 @@ class Sounding:
         sounding_descent.meta_data["sounding_direction"] = "descent"
 
         return sounding_ascent, sounding_descent
-
-    '''
-    def convert_sounding_df2ds(self):
-        unit_dict = {}
-        profile_copy = self.profile.copy()
-
-        for var in profile_copy.columns:
-            if isinstance(profile_copy[var].dtype, pint_pandas.pint_array.PintType):
-                unit_dict[var] = profile_copy[var].pint.units
-                profile_copy[var] = profile_copy[var].pint.magnitude
-
-        # Convert to xarray Dataset
-        self.profile = xr.Dataset.from_dataframe(profile_copy)
-
-        if self.unitregistry is not None:
-            self.unitregistry.force_ndarray_like = True
-
-        for var, unit in unit_dict.items():
-            self.profile[var].attrs["units"] = unit.__str__()
-        self.profile = self.profile.pint.quantify(unit_registry=self.unitregistry)
-        '''
 
     def convert_sounding_df2ds(self):
         unit_dict = {}
@@ -255,7 +194,6 @@ class Sounding:
             logging.warning("Sonde type for METEOMODEM is assumed to be 163")
             self.meta_data["sonde_type"] = "163"
 
-
     def get_sonde_serial_number(self):
         """Get sonde serial number"""
 
@@ -265,11 +203,10 @@ class Sounding:
                 self.meta_data["sonde_serial_number"] = self.meta_data["SerialNbr"]
             else:
                 logging.warning("Serial number missing in meta_data for MW41.")
-                self.meta_data["sonde_serial_number"] = np.nan  # Assign NaN if missing
+                self.meta_data["sonde_serial_number"] = np.nan
         elif self.level0_reader == "METEOMODEM":
             logging.warning("METEOMODEM does not have a serial number. Assigning NaN.")
-            self.meta_data["sonde_serial_number"] = np.nan  # Assign same NaN type
-
+            self.meta_data["sonde_serial_number"] = np.nan
 
     def calculate_additional_variables(self, config):
         """Calculation of additional variables"""
@@ -307,15 +244,16 @@ class Sounding:
             self.profile.insert(10, "dew_point", dewpoint)
 
         # Mixing ratio
-        #e_s = td.calc_saturation_pressure(self.profile.temperature.values)
         e_s = td.calc_saturation_pressure(self.profile.temperature.values, method="wagner_pruss")
         if "pint" in e_s.dtype.__str__():
             mixing_ratio = (
-                td.calc_wv_mixing_ratio(self.profile, e_s * self.profile.humidity.values)
+                td.calc_wv_mixing_ratio(self.profile, e_s)
+                * self.profile.humidity.values
             )
         else:
             mixing_ratio = (
-                td.calc_wv_mixing_ratio(self.profile, e_s * self.profile.humidity.values)
+                td.calc_wv_mixing_ratio(self.profile, e_s)
+                * self.profile.humidity.values
                 / 100.0
             )
         self.profile.insert(10, "mixing_ratio", mixing_ratio)
@@ -328,7 +266,6 @@ class Sounding:
         self.generate_sounding_id(config)
         self.get_sonde_type()
         self.get_sonde_serial_number()
-
 
     def collect_config(self, config, level):
         level_dims = {1: "flight_time", 2: "alt"}
@@ -400,7 +337,6 @@ class Sounding:
                 ds[k].encoding["dtype"] = coord_dtype
         return ds, unset_coords
 
-
     def create_dataset(self, config, level=1):
         merged_conf = self.collect_config(config, level)
         ds = dc.create_dataset(merged_conf)
@@ -414,17 +350,13 @@ class Sounding:
                 continue
             if "sounding" not in self.profile[var].dims:
                 self.profile[var] = self.profile[var].expand_dims({"sounding": 1})
-
         for k in ds.data_vars.keys():
             try:
                 int_var = config[f"level{level}"].variables[k].internal_varname
             except ConfigAttributeError:
                 logging.debug(f"{k} does not seem to have an internal varname")
                 continue
-
             dims = ds[k].dims
-
-            # Special cases handled as before
             if k == "launch_time":
                 try:
                     ds[k].data = self.profile[int_var].values
@@ -456,7 +388,6 @@ class Sounding:
                     ds[k].data = np.array(self.profile[int_var].values).T
                 else:
                     ds[k].data = self.profile[int_var].values
-
         ds, unset_coords = self.set_coordinate_data(
             ds, ds.coords, config[f"level{level}"]
         )
@@ -475,8 +406,6 @@ class Sounding:
 
         self.dataset = ds
 
-
-
     def get_direction(self):
         if self.profile.ascent_flag.values[0] == 0:
             direction = "ascent"
@@ -492,17 +421,17 @@ class Sounding:
             self.profile.squeeze().flight_time.values[first_idx_w_time]
         )
 
-
     def export(self, output_fmt, cfg):
         """
-        Saves sounding to disk with correctly formatted filename.
+        Save sounding to disk.
 
-        - Uses platform from `cfg.main.get("platform")` instead of extracting from filename.
-        - Converts "RV Meteor" → "RV_Meteor" while keeping config unchanged.
-        - Ensures 'platform' variable is correctly set before exporting.
+        - Uses platform from `cfg.main.get("platform")`
+        - Changes platform name to snake_format.
         """
+        platform_name = cfg.main.get("platform").replace(" ", "_")
+
         output = output_fmt.format(
-            platform=cfg.main.get("platform").replace(" ", "_"),  # Replace spaces with underscores
+            platform=platform_name,
             campaign=cfg.main.get("campaign"),
             campaign_id=cfg.main.get("campaign_id"),
             direction=self.meta_data["sounding_direction"],
@@ -512,51 +441,9 @@ class Sounding:
         directory = os.path.dirname(output)
         Path(directory).mkdir(parents=True, exist_ok=True)
 
-        platform_name = cfg.main.get("platform").replace(" ", "_")
-        platform_data = [platform_name] * self.dataset.dims['sounding']
+        platform_data = [platform_name] * self.dataset.dims["sounding"]
         self.dataset["platform"] = xr.DataArray(platform_data, dims=["sounding"])
         self.dataset["platform"].attrs["long_name"] = "Launching platform"
         self.dataset.encoding["unlimited_dims"] = ["sounding"]
         self.dataset.to_netcdf(output)
         logging.info(f"Sounding written to {output}")
-
-    '''
-    def export(self, output_fmt, cfg):
-        """
-        Saves sounding to disk
-        """
-        output = output_fmt.format(
-            platform=cfg.main.get("platform"),
-            campaign=cfg.main.get("campaign"),
-            campaign_id=cfg.main.get("campaign_id"),
-            direction=self.meta_data["sounding_direction"],
-            version=cfg.main.get("data_version"),
-        )
-        output = self.meta_data["launch_time_dt"].strftime(output)
-        directory = os.path.dirname(output)
-        Path(directory).mkdir(parents=True, exist_ok=True)
-        self.dataset.encoding["unlimited_dims"] = ["sounding"]
-        self.dataset.to_netcdf(output)
-        logging.info(f"Sounding written to {output}")
-    
-
-    def export(self, output_fmt, cfg):
-        """
-        Saves sounding to disk with correctly formatted filename.
-
-        - Converts "RV Meteor" → "RV_Meteor" while keeping config unchanged.
-        """
-        output = output_fmt.format(
-            platform=cfg.main.get("platform").replace(" ", "_"),  # Replace spaces with underscores
-            campaign=cfg.main.get("campaign"),
-            campaign_id=cfg.main.get("campaign_id"),
-            direction=self.meta_data["sounding_direction"],
-            version=cfg.main.get("data_version"),
-        )
-        output = self.meta_data["launch_time_dt"].strftime(output)
-        directory = os.path.dirname(output)
-        Path(directory).mkdir(parents=True, exist_ok=True)
-        self.dataset.encoding["unlimited_dims"] = ["sounding"]
-        self.dataset.to_netcdf(output)
-        logging.info(f"Sounding written to {output}")
-    '''

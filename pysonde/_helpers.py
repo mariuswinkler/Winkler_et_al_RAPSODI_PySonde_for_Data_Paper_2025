@@ -320,7 +320,7 @@ def write_dataset(ds, filename):
     ds = ds.pint.dequantify()
     ds.to_netcdf(filename, unlimited_dims=["sounding"])
 
-
+'''
 def _first_1d_dim(da: xr.DataArray) -> str:
     # Prefer a time-like dimension if present
     for cand in ("time", "datetime"):
@@ -389,3 +389,4 @@ def normalize_altitude(ds: xr.Dataset) -> xr.Dataset:
         "comment": "Available for RS41 when PTU ('Height') is present; NaN otherwise."
     })
     return ds
+'''
