@@ -25,13 +25,13 @@
 # Install pysonde if not already installed
 # pip install pysonde
 
-DATASET_VERSION="RS_ORCESTRA_level2_v4.0.4.nc"
+DATASET_VERSION="RS_ORCESTRA_level2_v4.0.4_raw.nc"
 
 BASE_PATH="/Users/marius/ownCloud/PhD/12_Orcestra_Campaign"
 CONFIG_PATH="$BASE_PATH/pysonde_for_datapaper/pysonde/config"
 
 DIRECTORY_LEVEL2="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level2"
-NETCDF_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/$DATASET_VERSION"
+NETCDF_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level2/merged_dataset/$DATASET_VERSION"
 TEMP_FILE="temp.nc"
 
 ls "$CONFIG_PATH"
@@ -279,7 +279,7 @@ if $PROCESS_POST_L2; then
         -a history,global,c,c,"$new_history" \
         -a license,global,c,c,"CC-BY-4.0" \
         -a references,global,c,c,"https://github.com/observingClouds/pysonde" \
-        -a keywords,global,c,c,"ORCESTRA, Radiosonde Profiles, Sounding, INMG, RV Meteor, BCO" \
+        -a keywords,global,c,c,"ORCESTRA, RAPSODI, Radiosonde Profiles, Sounding, INMG, RV Meteor, BCO" \
         "$TEMP_FILE"
 
     # Overwrite the original file with the corrected version
