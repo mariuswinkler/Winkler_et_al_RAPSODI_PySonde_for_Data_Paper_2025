@@ -65,8 +65,8 @@ def get_args():
         "-m",
         "--method",
         metavar="METHOD",
-        help="Interpolation method ('bin' (default), 'linear')",
-        default="bin",
+        help="Interpolation method ('bin' (default), 'linear', 'linear_masked')",
+        default="linear_masked",
         required=False,
     )
 
@@ -231,7 +231,7 @@ def main(args=None):
                 cfg,
             )
 
-            if args["method"] == "bin":
+            if args["method"] in ("bin", "linear_masked"):
                 ds_interp = p2.count_number_of_measurement_within_bin(
                     ds_interp, ds_new, cfg, interpolation_grid
                 )
