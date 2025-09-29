@@ -69,13 +69,12 @@ def _values_in_unit(da, target_unit: str, default_unit: str | None = None):
 
 
 def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
-    # Wind components from direction + speed
     u, v = mh.get_wind_components(ds.wdir, ds.wspd)
     ds["u"] = xr.DataArray(u.data, dims=["level"])
     ds["v"] = xr.DataArray(v.data, dims=["level"])
 
-    # Optional: Cartesian coordinates if WGS84 altitude is present
     if "alt_WGS84" in ds.keys():
+        # Convert lat, lon, alt to cartesian coordinates
         ecef = pyproj.Proj(proj="geocent", ellps="WGS84", datum="WGS84")
         lla = pyproj.Proj(proj="latlong", ellps="WGS84", datum="WGS84")
         x, y, z = pyproj.transform(
@@ -112,8 +111,6 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
     # Thermodynamics on the dataset now using 'alt' as the vertical dim
     td.metpy.units.units = uni
     theta = td.calc_theta_from_T(ds["ta"], ds["p"])
-
-    # Saturation vapor pressure (Wagner–Pruss), mixing ratio and specific humidity
     e_s = td.calc_saturation_pressure(ds["ta"], method="wagner_pruss")
     e   = ds["rh"] * e_s
     w   = td.calc_wv_mixing_ratio(ds, e)
@@ -183,10 +180,7 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
     -------
     ds_interp : xr.Dataset
     """
-    import numpy as np
-    import xarray as xr
-    from omegaconf.errors import ConfigAttributeError
-
+    
     if method == "linear":
         print("[pysonde] Using vertical interpolation method: linear")
 

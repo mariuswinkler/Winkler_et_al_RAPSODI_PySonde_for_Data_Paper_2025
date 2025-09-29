@@ -25,6 +25,7 @@
 # Install pysonde if not already installed
 # pip install pysonde
 
+#v4.0.4_raw --> Santander version, final fixed cor files
 #v4.0.5_raw --> with linear_masked interpolation
 
 DATASET_VERSION="RS_ORCESTRA_level2_v4.0.5_raw.nc"
