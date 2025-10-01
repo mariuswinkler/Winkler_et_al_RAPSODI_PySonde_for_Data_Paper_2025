@@ -134,3 +134,5 @@ dmypy.json
 *.DS_Store
 /conda_build/
 
+config_data_paper_original_until_Helene_PRs/
+config_for_PR/
