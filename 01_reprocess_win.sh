@@ -1,5 +1,5 @@
 #!/bin/bash
-# last usage: 25.09.2025
+# last usage: 30.09.2025
 
 # Script: 01_reprocess_win.sh
 #
@@ -27,8 +27,9 @@
 
 #v4.0.4_raw --> Santander version, final fixed cor files
 #v4.0.5_raw --> with linear_masked interpolation
+#v4.0.6_raw --> with new linear_masked interpolation trying to fix extra nan-values 
 
-DATASET_VERSION="RS_ORCESTRA_level2_v4.0.5_raw.nc"
+DATASET_VERSION="RS_ORCESTRA_level2_v4.0.6_raw.nc"
 
 BASE_PATH="/Users/marius/ownCloud/PhD/12_Orcestra_Campaign"
 CONFIG_PATH="$BASE_PATH/pysonde_for_datapaper/pysonde/config"

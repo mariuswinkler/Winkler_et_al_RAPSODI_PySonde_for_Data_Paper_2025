@@ -184,70 +184,140 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
     if method == "linear":
         print("[pysonde] Using vertical interpolation method: linear")
 
-        # --- drop NaNs & sort by altitude
+        # --- clean & sort only by 'alt' ---
         ds_sorted = ds_new.sortby("alt")
         ds_sorted = ds_sorted.where(np.isfinite(ds_sorted["alt"]), drop=True)
 
-        # --- preserve flight_time across interpolation (datetime -> int64 ns -> datetime) ---
-        if "flight_time" in ds_sorted.variables and ("alt" in ds_sorted["flight_time"].dims):
-            # make a numeric copy for interpolation
-            ds_lin = ds_sorted.copy()
-            ds_lin["flight_time_ns"] = ds_lin["flight_time"].astype("datetime64[ns]").astype("int64")
-            ds_lin = ds_lin.drop_vars("flight_time")
+        # Interpolate on the target alt grid
+        ds_interp = ds_sorted.interp(alt=interpolation_grid, method="linear")
 
-            # interpolate everything (including flight_time_ns)
-            ds_interp = ds_lin.interp(alt=interpolation_grid)
-
-            # convert back to datetime64 and restore the original name
-            ds_interp["flight_time"] = ds_interp["flight_time_ns"].astype("datetime64[ns]")
-            ds_interp = ds_interp.drop_vars("flight_time_ns")
-        else:
-            # no flight_time to preserve — normal path
-            ds_interp = ds_sorted.interp(alt=interpolation_grid)
-
+        print("pressure before:", ds_sorted.pressure.values)
         # --- robust log-p interpolation to preserve p(z) profile ---
         p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
-        if p_name is not None and ("alt" in ds_new):
+        if (p_name is not None) and ("alt" in ds_new.dims or "alt" in ds_new.coords):
             p_da = ds_sorted[p_name]
             z_da = ds_sorted["alt"]
 
-            # If pressure/alt are (sounding, alt), pick the first sounding to reduce to 1D
+            # reduce to 1D along alt if needed
             if "sounding" in p_da.dims:
                 p_da = p_da.isel(sounding=0)
             if "sounding" in z_da.dims:
                 z_da = z_da.isel(sounding=0)
 
-            # Get numeric arrays with safe unit handling
-            p_src = _values_in_unit(p_da, "hPa", default_unit="hPa")
-            z_src = _values_in_unit(z_da, "m",   default_unit="m")
+            # numeric arrays with units handled
+            p_src = np.asarray(_values_in_unit(p_da, "hPa", default_unit="hPa")).ravel()
+            z_src = np.asarray(_values_in_unit(z_da, "m",   default_unit="m")).ravel()
 
-            p_src = np.asarray(p_src).ravel()
-            z_src = np.asarray(z_src).ravel()
             mfin = np.isfinite(p_src) & np.isfinite(z_src)
-            p_src = p_src[mfin]
-            z_src = z_src[mfin]
+            p_src, z_src = p_src[mfin], z_src[mfin]
 
             if z_src.size >= 2:
                 order = np.argsort(z_src)
-                z_src = z_src[order]
-                p_src = p_src[order]
-                z_out = np.asarray(interpolation_grid).ravel()
+                z_src, p_src = z_src[order], p_src[order]
+                z_out = np.asarray(ds_interp["alt"].values).ravel()
+                # print("\nz_src:", z_src)
+                # print("\np_src:", p_src)
+                # print("\nz_out:", z_out)
 
-                print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
-                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # → hPa numeric
+                # print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
+                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # numeric hPa
+                # print("\np_out:", p_out)
+
+                # --- minimal endpoint fix for p_out without changing mh.pressure_interpolation ---
+                # fill p_out[0] if it's NaN but within the measured span
+                zmin, zmax = z_src[0], z_src[-1]
+                # NOTE: z_src is sorted above
+
+                def _fill_endpoint(z_target, idx_target):
+                    if np.isnan(p_out[idx_target]) and (zmin <= z_target <= zmax):
+                        # find bracketing indices in z_src
+                        j_hi = np.searchsorted(z_src, z_target, side="left")
+                        if 0 < j_hi < len(z_src):
+                            j_lo = j_hi - 1
+                            z1, z2 = z_src[j_lo], z_src[j_hi]
+                            p1, p2 = p_src[j_lo], p_src[j_hi]
+                            if np.isfinite(z1) and np.isfinite(z2) and np.isfinite(p1) and np.isfinite(p2) and (z2 > z1):
+                                # log-linear in pressure vs altitude
+                                lp = np.interp(z_target, [z1, z2], [np.log(p1), np.log(p2)])
+                                p_out[idx_target] = float(np.exp(lp))
+
+                # first bin (usually 0 m)
+                _fill_endpoint(z_out[0], 0)
+                # last bin
+                _fill_endpoint(z_out[-1], -1)
+                # print("\np_out out:", p_out)
 
                 ds_interp[p_name] = xr.DataArray(
                     p_out,
                     dims=("alt",),
-                    coords={"alt": interpolation_grid},
+                    coords={"alt": ds_interp["alt"].values},
                     attrs={**ds_new[p_name].attrs, "units": "hPa"},
                 )
+        # print("pressure after:", ds_interp.pressure.values)
 
-        # --- ensure pressure is a Quantity (needed downstream) ---
+        # --- ensure pressure has Pint units downstream ---
         p_name = "pressure" if "pressure" in ds_interp else ("p" if "p" in ds_interp else None)
         if p_name is not None:
             ds_interp[p_name] = _safe_to(ds_interp[p_name], "hPa", default_unit="hPa")
-            
+        # print("pressure after after:", ds_interp.pressure.values)
+
+        # --- unit harmonization for other variables ---
+        for var_in, var_out in variables:
+            try:
+                ds_interp[var_out] = ds_interp[var_out].pint.quantify(ds_new[var_out].pint.units)
+                ds_interp[var_out] = ds_interp[var_out].pint.to(cfg.level2.variables[var_in].attrs.units)
+            except (KeyError, ValueError, ConfigAttributeError):
+                pass
+
+        # --- guarantee size-1 'sounding' dim (adjust_ds_after_interpolation expects it) ---
+        if "sounding" not in ds_interp.dims:
+            ds_interp = ds_interp.expand_dims({"sounding": 1})
+
+        # --- ensure scalar launch_time present (0-D datetime64[ns]) ---
+        def _first_finite_dt64_scalar(da):
+            """Return first finite datetime64[ns] from a time-like DataArray as 0-D."""
+            # reduce any extra dims (e.g., sounding/alt) by taking the first finite element
+            vals = da.values
+            # to ns int for finite mask
+            ns = vals.astype("datetime64[ns]").astype("int64")
+            m = np.isfinite(ns)
+            if m.any():
+                return xr.DataArray(vals[m][0].astype("datetime64[ns]"), dims=())
+            return None
+
+        lt_scalar = None
+
+        # 1) prefer a scalar 'launch_time' from the input
+        if "launch_time" in ds_new and ds_new["launch_time"].ndim == 0:
+            lt_scalar = xr.DataArray(
+                ds_new["launch_time"].values.astype("datetime64[ns]"), dims=()
+            )
+        # 2) fallback: derive from per-level time variables in the ORIGINAL input
+        elif any(v in ds_new for v in ("flight_time", "time")):
+            for cand in ("flight_time", "time"):
+                if cand in ds_new:
+                    tvar = ds_new[cand]
+                    # drop sounding dim if present
+                    if "sounding" in tvar.dims:
+                        tvar = tvar.isel(sounding=0)
+                    # pick first finite timestamp
+                    lt_scalar = _first_finite_dt64_scalar(tvar)
+                    if lt_scalar is not None:
+                        break
+        # 3) final fallback: dataset attribute
+        if lt_scalar is None and "launch_time" in ds_new.attrs:
+            lt_scalar = xr.DataArray(
+                np.datetime64(ds_new.attrs["launch_time"]).astype("datetime64[ns]"),
+                dims=()
+            )
+
+        if lt_scalar is None:
+            raise ValueError(
+                "Failed to determine a scalar launch_time (looked for scalar 'launch_time', "
+                "or first finite in 'flight_time'/'time', or ds_new.attrs['launch_time'])."
+            )
+
+        ds_interp["launch_time"] = lt_scalar
 
     elif method == "bin":
         # --- bin-mean on alt using numeric labels (no pandas.Interval left) ---
@@ -287,7 +357,6 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
 
     elif method == "linear_masked":
         print("[pysonde] Using vertical interpolation method: linear_masked")
-
         # --- 1) Do exactly what 'linear' does (preserve flight_time, interp, robust log-p) ---
 
         # drop NaNs & sort by altitude (same as linear)
@@ -299,76 +368,132 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
             ds_lin = ds_sorted.copy()
             ds_lin["flight_time_ns"] = ds_lin["flight_time"].astype("datetime64[ns]").astype("int64")
             ds_lin = ds_lin.drop_vars("flight_time")
-            ds_interp = ds_lin.interp(alt=interpolation_grid)
+
+            # pre-fill internal NaNs along alt so .interp doesn't propagate gaps
+            ds_filled = ds_lin.interpolate_na(dim="alt", method="linear", use_coordinate=True)
+
+            ds_interp = ds_filled.interp(
+                alt=interpolation_grid,
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+            # convert back to datetime64 and restore the original name
             ds_interp["flight_time"] = ds_interp["flight_time_ns"].astype("datetime64[ns]")
             ds_interp = ds_interp.drop_vars("flight_time_ns")
         else:
-            ds_interp = ds_sorted.interp(alt=interpolation_grid)
+            ds_filled = ds_sorted.interpolate_na(dim="alt", method="linear", use_coordinate=True)
+            ds_interp = ds_filled.interp(
+                alt=interpolation_grid,
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
 
-        # robust log-p interpolation (identical to linear, but guarded)
+        # --- robust log-p interpolation to preserve p(z) profile (aligned with 'linear') ---
         p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
-        if p_name is not None and ("alt" in ds_new):
+        if (p_name is not None) and ("alt" in ds_new.dims or "alt" in ds_new.coords):
             p_da = ds_sorted[p_name]
             z_da = ds_sorted["alt"]
+
+            # reduce to 1D along alt if needed
             if "sounding" in p_da.dims:
                 p_da = p_da.isel(sounding=0)
             if "sounding" in z_da.dims:
                 z_da = z_da.isel(sounding=0)
 
-            p_src = _values_in_unit(p_da, "hPa", default_unit="hPa")
-            z_src = _values_in_unit(z_da, "m",   default_unit="m")
+            # numeric arrays with units handled
+            p_src = np.asarray(_values_in_unit(p_da, "hPa", default_unit="hPa")).ravel()
+            z_src = np.asarray(_values_in_unit(z_da, "m",   default_unit="m")).ravel()
 
-            p_src = np.asarray(p_src).ravel()
-            z_src = np.asarray(z_src).ravel()
-            mfin  = np.isfinite(p_src) & np.isfinite(z_src)
-            p_src = p_src[mfin]
-            z_src = z_src[mfin]
+            mfin = np.isfinite(p_src) & np.isfinite(z_src)
+            p_src, z_src = p_src[mfin], z_src[mfin]
 
             if z_src.size >= 2:
                 order = np.argsort(z_src)
-                z_src = z_src[order]
-                p_src = p_src[order]
-                z_out = np.asarray(interpolation_grid).ravel()
-                # same function as in 'linear'; only call when arrays are valid
-                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # → hPa numeric
+                z_src, p_src = z_src[order], p_src[order]
+                z_out = np.asarray(ds_interp["alt"].values).ravel()
+
+                # DEBUG prints (optional)
+                # print("\nz_src:", z_src)
+                # print("\np_src:", p_src)
+                # print("\nz_out:", z_out)
+                # print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
+
+                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # numeric hPa
+
+                # --- minimal endpoint fix for p_out without changing mh.pressure_interpolation ---
+                # fill endpoints if they are NaN but lie within the measured span
+                zmin, zmax = z_src[0], z_src[-1]  # z_src is sorted above
+
+                def _fill_endpoint(z_target, idx_target):
+                    if np.isnan(p_out[idx_target]) and (zmin <= z_target <= zmax):
+                        # find bracketing indices in z_src
+                        j_hi = np.searchsorted(z_src, z_target, side="left")
+                        if 0 < j_hi < len(z_src):
+                            j_lo = j_hi - 1
+                            z1, z2 = z_src[j_lo], z_src[j_hi]
+                            p1, p2 = p_src[j_lo], p_src[j_hi]
+                            if np.isfinite(z1) and np.isfinite(z2) and np.isfinite(p1) and np.isfinite(p2) and (z2 > z1):
+                                # log-linear interpolation in pressure vs altitude
+                                lp = np.interp(z_target, [z1, z2], [np.log(p1), np.log(p2)])
+                                p_out[idx_target] = float(np.exp(lp))
+
+                # first bin (often 0 m)
+                _fill_endpoint(z_out[0], 0)
+                # last bin
+                _fill_endpoint(z_out[-1], -1)
+
+                # DEBUG print (optional)
+                # print("\np_out (after endpoint fix):", p_out)
+
                 ds_interp[p_name] = xr.DataArray(
                     p_out,
                     dims=("alt",),
-                    coords={"alt": interpolation_grid},
+                    coords={"alt": ds_interp["alt"].values},
                     attrs={**ds_new[p_name].attrs, "units": "hPa"},
                 )
-        # ensure pressure is a Quantity (needed downstream)
+
+        # --- ensure pressure has Pint units downstream ---
         p_name = "pressure" if "pressure" in ds_interp else ("p" if "p" in ds_interp else None)
         if p_name is not None:
             ds_interp[p_name] = _safe_to(ds_interp[p_name], "hPa", default_unit="hPa")
 
-        # --- 2) Build per-variable occupancy mask from original samples and apply it ---
+        # --- 2) Build per-variable occupancy mask from a temporary bin-mean (to match 'bin' exactly) ---
 
-        inc  = cfg.level2.setup.interpolation_grid_inc
-        bins = np.arange(
-            interpolation_grid[0] - 0.5 * inc,
-            interpolation_grid[-1] + 0.5 * inc + 0.5 * inc,
-            inc,
+        interpolation_bins = np.arange(
+            cfg.level2.setup.interpolation_grid_min - cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_max + cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_inc,
         )
 
-        # numeric data variables on 'alt' in the interpolated dataset
-        numeric_alt_vars = [
-            v for v in ds_interp.data_vars
-            if ("alt" in ds_interp[v].dims) and np.issubdtype(ds_interp[v].dtype, np.number)
-        ]
+        # Use the same source and quirks as the 'bin' branch
+        src = ds_new
+        if "sounding" in src.dims and src.sizes["sounding"] > 1:
+            src = src.isel(sounding=0)
 
-        if numeric_alt_vars:
-            dsbinned = (
-                ds_new[numeric_alt_vars]
-                .groupby_bins("alt", bins=bins, labels=interpolation_grid)
-                .count()
-                .rename({"alt_bins": "alt"})
+        # Workaround for object dtype times (same as in bin path)
+        if "flight_time" in src:
+            src = src.copy()
+            src["flight_time"] = src["flight_time"].astype(int)
+
+        # Build a temporary bin-mean dataset on the SAME edges/labels as the 'bin' method
+        tmp_bin = (
+            src.groupby_bins(
+                "alt",
+                interpolation_bins,
+                labels=interpolation_grid,
+                restore_coord_dims=True,
             )
+            .mean()  # skipna=True by default
+            .transpose()
+            .rename({"alt_bins": "alt"})
+        )
 
-            # apply each variable's own mask
-            for v in numeric_alt_vars:
-                if v in dsbinned:
-                    ds_interp[v] = ds_interp[v].where(dsbinned[v] > 0)
+        # Apply per-variable mask: keep values where the tmp_bin mean is non-NaN
+        for v in ds_interp.data_vars:
+            da = ds_interp[v]
+            if ("alt" in da.dims) and np.issubdtype(da.dtype, np.number) and (v in tmp_bin):
+                valid = ~np.isnan(tmp_bin[v])
+                ds_interp[v] = da.where(valid)
 
         # carry launch_time if present
         if "launch_time" in ds_new:
@@ -378,6 +503,7 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
         raise ValueError(f"Unknown interpolation method: {method}")
 
     return ds_interp
+
 
 
 
@@ -486,9 +612,14 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
         _safe_to(ds_interp.isel(sounding=0)["pressure"],    "hPa",  default_unit="hPa"),
     )
 
+    print("theta[:5] =", ds_interp.isel(sounding=0)["theta"].values[:5])
+    print("press [:5] =", ds_interp.isel(sounding=0)["pressure"].values[:5])
+    print("T_new[:5]  =", temperature.values[:5])
+
     ds_interp["temperature"] = xr.DataArray(
         temperature.data, dims=dims_1d, coords=coords_1d
     )
+
     ds_interp["temperature"] = ds_interp["temperature"].expand_dims({"sounding": 1})
 
     w = (ds_interp.isel(sounding=0)["specific_humidity"]) / (

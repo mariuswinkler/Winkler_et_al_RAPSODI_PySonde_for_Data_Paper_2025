@@ -231,7 +231,7 @@ def main(args=None):
                 cfg,
             )
 
-            if args["method"] in ("bin", "linear_masked"):
+            if args["method"] in ("bin"):
                 ds_interp = p2.count_number_of_measurement_within_bin(
                     ds_interp, ds_new, cfg, interpolation_grid
                 )
