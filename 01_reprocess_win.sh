@@ -1,5 +1,5 @@
 #!/bin/bash
-# last usage: 16.08.2025
+# last usage: 30.09.2025
 
 # Script: 01_reprocess_win.sh
 #
@@ -25,7 +25,11 @@
 # Install pysonde if not already installed
 # pip install pysonde
 
-DATASET_VERSION="RS_ORCESTRA_level2_v4.0.4_raw.nc"
+#v4.0.4_raw --> Santander version, final fixed cor files
+#v4.0.5_raw --> with linear_masked interpolation
+#v4.0.6_raw --> with new linear_masked interpolation trying to fix extra nan-values 
+
+DATASET_VERSION="RS_ORCESTRA_level2_v4.0.6_raw.nc"
 
 BASE_PATH="/Users/marius/ownCloud/PhD/12_Orcestra_Campaign"
 CONFIG_PATH="$BASE_PATH/pysonde_for_datapaper/pysonde/config"
@@ -78,6 +82,13 @@ if $PROCESS_L0_L1; then
     BCO_LOG_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files/process_01_BCO_L0-L1_log.txt"
     METEOR_LOG_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files/process_02_Meteor_L0-L1_log.txt"
     INMG_LOG_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files/process_03_INMG_L0-L1_log.txt"
+
+    # ensure log dir exists
+    mkdir -p "$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files"
+    # truncate logs for this run
+    : > "$BCO_LOG_FILE"
+    : > "$METEOR_LOG_FILE"
+    : > "$INMG_LOG_FILE"
 
     # Processing BCO files
     BCO_FILES=("$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level0/BCO/"*.mwx)
@@ -152,6 +163,13 @@ if $PROCESS_L1_L2; then
     METEOR_L2_LOG_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files/process_05_Meteor_L1-L2_log.txt"
     INMG_L2_LOG_FILE="$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files/process_06_INMG_L1-L2_log.txt"
     
+    # ensure log dir exists
+    mkdir -p "$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/reprocessing_log_files"
+    # truncate logs for this run
+    : > "$BCO_L2_LOG_FILE"
+    : > "$METEOR_L2_LOG_FILE"
+    : > "$INMG_L2_LOG_FILE"
+
     # Processing BCO files
     BCO_L2_FILES=("$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level1/BCO/"*.nc)
     BCO_L2_TOTAL=${#BCO_L2_FILES[@]}

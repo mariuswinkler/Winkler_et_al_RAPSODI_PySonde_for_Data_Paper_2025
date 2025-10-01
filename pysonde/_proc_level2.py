@@ -15,15 +15,66 @@ from . import meteorology_helpers as mh
 from . import thermodynamics as td
 from .readers.readers import pysondeL1
 
+def _safe_to(da, target_unit: str, default_unit: str | None = None):
+    """
+    Convert DataArray to `target_unit` robustly.
+    - If already a Quantity → .pint.to(target_unit)
+    - Else if has attrs['units'] → quantify then convert
+    - Else → quantify with default_unit (or target_unit) then convert
+    Always returns a Quantity DataArray.
+    """
+    # Already quantified?
+    try:
+        return da.pint.to(target_unit)
+    except Exception:
+        pass
+
+    # Try from declared attribute
+    u = getattr(da, "attrs", {}).get("units")
+    if u:
+        try:
+            return da.pint.quantify(u).pint.to(target_unit)
+        except Exception:
+            pass
+
+    # Last resort: assume a unit (or target if none provided)
+    assumed = default_unit or target_unit
+    return da.pint.quantify(assumed).pint.to(target_unit)
+
+
+def _values_in_unit(da, target_unit: str, default_unit: str | None = None):
+    """Return numeric values in target_unit if possible; otherwise fall back safely."""
+    # Try pint conversion if already quantified
+    try:
+        return da.pint.to(target_unit).values
+    except Exception:
+        pass
+    # Try from attr
+    u = getattr(da, "attrs", {}).get("units")
+    if u:
+        try:
+            return da.pint.quantify(u).pint.to(target_unit).values
+        except Exception:
+            pass
+    # Fallback: assume default or target
+    arr = da.values
+    if default_unit and default_unit != target_unit:
+        if default_unit == "Pa" and target_unit in ("hPa", "mbar"):
+            return arr / 100.0
+        if default_unit in ("hPa", "mbar") and target_unit == "Pa":
+            return arr * 100.0
+        if default_unit == "km" and target_unit == "m":
+            return arr * 1000.0
+    return arr
+
 
 def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
-    # Wind components from direction + speed
     u, v = mh.get_wind_components(ds.wdir, ds.wspd)
     ds["u"] = xr.DataArray(u.data, dims=["level"])
     ds["v"] = xr.DataArray(v.data, dims=["level"])
 
-    # Optional: Cartesian coordinates if WGS84 altitude is present
     if "alt_WGS84" in ds.keys():
+        # Convert lat, lon, alt to cartesian coordinates
         ecef = pyproj.Proj(proj="geocent", ellps="WGS84", datum="WGS84")
         lla = pyproj.Proj(proj="latlong", ellps="WGS84", datum="WGS84")
         x, y, z = pyproj.transform(
@@ -60,8 +111,6 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
     # Thermodynamics on the dataset now using 'alt' as the vertical dim
     td.metpy.units.units = uni
     theta = td.calc_theta_from_T(ds["ta"], ds["p"])
-
-    # Saturation vapor pressure (Wagner–Pruss), mixing ratio and specific humidity
     e_s = td.calc_saturation_pressure(ds["ta"], method="wagner_pruss")
     e   = ds["rh"] * e_s
     w   = td.calc_wv_mixing_ratio(ds, e)
@@ -131,44 +180,148 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
     -------
     ds_interp : xr.Dataset
     """
-    import numpy as np
-    import xarray as xr
-    from omegaconf.errors import ConfigAttributeError
-
+    
     if method == "linear":
-        # --- linear interpolation on numeric 'alt' ---
-        # Ensure we drop NaNs for a clean 1D interpolation
-        ds_lin = ds_new.dropna(dim="alt", how="any")
-        ds_interp = ds_lin.interp(alt=interpolation_grid)
+        print("[pysonde] Using vertical interpolation method: linear")
 
-        # Logarithmic pressure interpolation to preserve p(z) profile
-        pres_int_p = ds_new.pressure.pint.to("hPa").values[0]
-        # 'alt' may be a coordinate without pint; handle both cases
-        try:
-            pres_int_a = ds_new["alt"].pint.to("m").values[0]
-        except Exception:
-            pres_int_a = ds_new["alt"].values[0] * sounding.unitregistry("m")
+        # --- clean & sort only by 'alt' ---
+        ds_sorted = ds_new.sortby("alt")
+        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted["alt"]), drop=True)
 
-        dims_1d = ["alt"]
-        coords_1d = {"alt": ds_interp.alt.data}
-        alt_out = ds_interp.alt.values
-        interp_pres = mh.pressure_interpolation(
-            pres_int_p, pres_int_a, alt_out
-        ) * sounding.unitregistry("hPa")
-        ds_interp["pressure"] = xr.DataArray(interp_pres, dims=dims_1d, coords=coords_1d)
-        ds_interp["pressure"] = ds_interp["pressure"].expand_dims({"sounding": 1})
+        # Interpolate on the target alt grid
+        ds_interp = ds_sorted.interp(alt=interpolation_grid, method="linear")
 
-        # Unit harmonization for other variables
+        print("pressure before:", ds_sorted.pressure.values)
+        # --- robust log-p interpolation to preserve p(z) profile ---
+        p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
+        if (p_name is not None) and ("alt" in ds_new.dims or "alt" in ds_new.coords):
+            p_da = ds_sorted[p_name]
+            z_da = ds_sorted["alt"]
+
+            # reduce to 1D along alt if needed
+            if "sounding" in p_da.dims:
+                p_da = p_da.isel(sounding=0)
+            if "sounding" in z_da.dims:
+                z_da = z_da.isel(sounding=0)
+
+            # numeric arrays with units handled
+            p_src = np.asarray(_values_in_unit(p_da, "hPa", default_unit="hPa")).ravel()
+            z_src = np.asarray(_values_in_unit(z_da, "m",   default_unit="m")).ravel()
+
+            mfin = np.isfinite(p_src) & np.isfinite(z_src)
+            p_src, z_src = p_src[mfin], z_src[mfin]
+
+            if z_src.size >= 2:
+                order = np.argsort(z_src)
+                z_src, p_src = z_src[order], p_src[order]
+                z_out = np.asarray(ds_interp["alt"].values).ravel()
+                # print("\nz_src:", z_src)
+                # print("\np_src:", p_src)
+                # print("\nz_out:", z_out)
+
+                # print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
+                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # numeric hPa
+                # print("\np_out:", p_out)
+
+                # --- minimal endpoint fix for p_out without changing mh.pressure_interpolation ---
+                # fill p_out[0] if it's NaN but within the measured span
+                zmin, zmax = z_src[0], z_src[-1]
+                # NOTE: z_src is sorted above
+
+                def _fill_endpoint(z_target, idx_target):
+                    if np.isnan(p_out[idx_target]) and (zmin <= z_target <= zmax):
+                        # find bracketing indices in z_src
+                        j_hi = np.searchsorted(z_src, z_target, side="left")
+                        if 0 < j_hi < len(z_src):
+                            j_lo = j_hi - 1
+                            z1, z2 = z_src[j_lo], z_src[j_hi]
+                            p1, p2 = p_src[j_lo], p_src[j_hi]
+                            if np.isfinite(z1) and np.isfinite(z2) and np.isfinite(p1) and np.isfinite(p2) and (z2 > z1):
+                                # log-linear in pressure vs altitude
+                                lp = np.interp(z_target, [z1, z2], [np.log(p1), np.log(p2)])
+                                p_out[idx_target] = float(np.exp(lp))
+
+                # first bin (usually 0 m)
+                _fill_endpoint(z_out[0], 0)
+                # last bin
+                _fill_endpoint(z_out[-1], -1)
+                # print("\np_out out:", p_out)
+
+                ds_interp[p_name] = xr.DataArray(
+                    p_out,
+                    dims=("alt",),
+                    coords={"alt": ds_interp["alt"].values},
+                    attrs={**ds_new[p_name].attrs, "units": "hPa"},
+                )
+        # print("pressure after:", ds_interp.pressure.values)
+
+        # --- ensure pressure has Pint units downstream ---
+        p_name = "pressure" if "pressure" in ds_interp else ("p" if "p" in ds_interp else None)
+        if p_name is not None:
+            ds_interp[p_name] = _safe_to(ds_interp[p_name], "hPa", default_unit="hPa")
+        # print("pressure after after:", ds_interp.pressure.values)
+
+        # --- unit harmonization for other variables ---
         for var_in, var_out in variables:
             try:
                 ds_interp[var_out] = ds_interp[var_out].pint.quantify(ds_new[var_out].pint.units)
                 ds_interp[var_out] = ds_interp[var_out].pint.to(cfg.level2.variables[var_in].attrs.units)
             except (KeyError, ValueError, ConfigAttributeError):
-                # some vars may be unitless or absent
                 pass
+
+        # --- guarantee size-1 'sounding' dim (adjust_ds_after_interpolation expects it) ---
+        if "sounding" not in ds_interp.dims:
+            ds_interp = ds_interp.expand_dims({"sounding": 1})
+
+        # --- ensure scalar launch_time present (0-D datetime64[ns]) ---
+        def _first_finite_dt64_scalar(da):
+            """Return first finite datetime64[ns] from a time-like DataArray as 0-D."""
+            # reduce any extra dims (e.g., sounding/alt) by taking the first finite element
+            vals = da.values
+            # to ns int for finite mask
+            ns = vals.astype("datetime64[ns]").astype("int64")
+            m = np.isfinite(ns)
+            if m.any():
+                return xr.DataArray(vals[m][0].astype("datetime64[ns]"), dims=())
+            return None
+
+        lt_scalar = None
+
+        # 1) prefer a scalar 'launch_time' from the input
+        if "launch_time" in ds_new and ds_new["launch_time"].ndim == 0:
+            lt_scalar = xr.DataArray(
+                ds_new["launch_time"].values.astype("datetime64[ns]"), dims=()
+            )
+        # 2) fallback: derive from per-level time variables in the ORIGINAL input
+        elif any(v in ds_new for v in ("flight_time", "time")):
+            for cand in ("flight_time", "time"):
+                if cand in ds_new:
+                    tvar = ds_new[cand]
+                    # drop sounding dim if present
+                    if "sounding" in tvar.dims:
+                        tvar = tvar.isel(sounding=0)
+                    # pick first finite timestamp
+                    lt_scalar = _first_finite_dt64_scalar(tvar)
+                    if lt_scalar is not None:
+                        break
+        # 3) final fallback: dataset attribute
+        if lt_scalar is None and "launch_time" in ds_new.attrs:
+            lt_scalar = xr.DataArray(
+                np.datetime64(ds_new.attrs["launch_time"]).astype("datetime64[ns]"),
+                dims=()
+            )
+
+        if lt_scalar is None:
+            raise ValueError(
+                "Failed to determine a scalar launch_time (looked for scalar 'launch_time', "
+                "or first finite in 'flight_time'/'time', or ds_new.attrs['launch_time'])."
+            )
+
+        ds_interp["launch_time"] = lt_scalar
 
     elif method == "bin":
         # --- bin-mean on alt using numeric labels (no pandas.Interval left) ---
+        print("[pysonde] Using vertical interpolation method: bin")
         interpolation_bins = np.arange(
             cfg.level2.setup.interpolation_grid_min - cfg.level2.setup.interpolation_grid_inc / 2,
             cfg.level2.setup.interpolation_grid_max + cfg.level2.setup.interpolation_grid_inc / 2,
@@ -202,10 +355,155 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
         if "launch_time" in ds_new:
             ds_interp["launch_time"] = ds_new["launch_time"]
 
+    elif method == "linear_masked":
+        print("[pysonde] Using vertical interpolation method: linear_masked")
+        # --- 1) Do exactly what 'linear' does (preserve flight_time, interp, robust log-p) ---
+
+        # drop NaNs & sort by altitude (same as linear)
+        ds_sorted = ds_new.sortby("alt")
+        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted["alt"]), drop=True)
+
+        # preserve flight_time across interpolation (datetime -> int64 ns -> datetime)
+        if "flight_time" in ds_sorted.variables and ("alt" in ds_sorted["flight_time"].dims):
+            ds_lin = ds_sorted.copy()
+            ds_lin["flight_time_ns"] = ds_lin["flight_time"].astype("datetime64[ns]").astype("int64")
+            ds_lin = ds_lin.drop_vars("flight_time")
+
+            # pre-fill internal NaNs along alt so .interp doesn't propagate gaps
+            ds_filled = ds_lin.interpolate_na(dim="alt", method="linear", use_coordinate=True)
+
+            ds_interp = ds_filled.interp(
+                alt=interpolation_grid,
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+            # convert back to datetime64 and restore the original name
+            ds_interp["flight_time"] = ds_interp["flight_time_ns"].astype("datetime64[ns]")
+            ds_interp = ds_interp.drop_vars("flight_time_ns")
+        else:
+            ds_filled = ds_sorted.interpolate_na(dim="alt", method="linear", use_coordinate=True)
+            ds_interp = ds_filled.interp(
+                alt=interpolation_grid,
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+
+        # --- robust log-p interpolation to preserve p(z) profile (aligned with 'linear') ---
+        p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
+        if (p_name is not None) and ("alt" in ds_new.dims or "alt" in ds_new.coords):
+            p_da = ds_sorted[p_name]
+            z_da = ds_sorted["alt"]
+
+            # reduce to 1D along alt if needed
+            if "sounding" in p_da.dims:
+                p_da = p_da.isel(sounding=0)
+            if "sounding" in z_da.dims:
+                z_da = z_da.isel(sounding=0)
+
+            # numeric arrays with units handled
+            p_src = np.asarray(_values_in_unit(p_da, "hPa", default_unit="hPa")).ravel()
+            z_src = np.asarray(_values_in_unit(z_da, "m",   default_unit="m")).ravel()
+
+            mfin = np.isfinite(p_src) & np.isfinite(z_src)
+            p_src, z_src = p_src[mfin], z_src[mfin]
+
+            if z_src.size >= 2:
+                order = np.argsort(z_src)
+                z_src, p_src = z_src[order], p_src[order]
+                z_out = np.asarray(ds_interp["alt"].values).ravel()
+
+                # DEBUG prints (optional)
+                # print("\nz_src:", z_src)
+                # print("\np_src:", p_src)
+                # print("\nz_out:", z_out)
+                # print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
+
+                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # numeric hPa
+
+                # --- minimal endpoint fix for p_out without changing mh.pressure_interpolation ---
+                # fill endpoints if they are NaN but lie within the measured span
+                zmin, zmax = z_src[0], z_src[-1]  # z_src is sorted above
+
+                def _fill_endpoint(z_target, idx_target):
+                    if np.isnan(p_out[idx_target]) and (zmin <= z_target <= zmax):
+                        # find bracketing indices in z_src
+                        j_hi = np.searchsorted(z_src, z_target, side="left")
+                        if 0 < j_hi < len(z_src):
+                            j_lo = j_hi - 1
+                            z1, z2 = z_src[j_lo], z_src[j_hi]
+                            p1, p2 = p_src[j_lo], p_src[j_hi]
+                            if np.isfinite(z1) and np.isfinite(z2) and np.isfinite(p1) and np.isfinite(p2) and (z2 > z1):
+                                # log-linear interpolation in pressure vs altitude
+                                lp = np.interp(z_target, [z1, z2], [np.log(p1), np.log(p2)])
+                                p_out[idx_target] = float(np.exp(lp))
+
+                # first bin (often 0 m)
+                _fill_endpoint(z_out[0], 0)
+                # last bin
+                _fill_endpoint(z_out[-1], -1)
+
+                # DEBUG print (optional)
+                # print("\np_out (after endpoint fix):", p_out)
+
+                ds_interp[p_name] = xr.DataArray(
+                    p_out,
+                    dims=("alt",),
+                    coords={"alt": ds_interp["alt"].values},
+                    attrs={**ds_new[p_name].attrs, "units": "hPa"},
+                )
+
+        # --- ensure pressure has Pint units downstream ---
+        p_name = "pressure" if "pressure" in ds_interp else ("p" if "p" in ds_interp else None)
+        if p_name is not None:
+            ds_interp[p_name] = _safe_to(ds_interp[p_name], "hPa", default_unit="hPa")
+
+        # --- 2) Build per-variable occupancy mask from a temporary bin-mean (to match 'bin' exactly) ---
+
+        interpolation_bins = np.arange(
+            cfg.level2.setup.interpolation_grid_min - cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_max + cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_inc,
+        )
+
+        # Use the same source and quirks as the 'bin' branch
+        src = ds_new
+        if "sounding" in src.dims and src.sizes["sounding"] > 1:
+            src = src.isel(sounding=0)
+
+        # Workaround for object dtype times (same as in bin path)
+        if "flight_time" in src:
+            src = src.copy()
+            src["flight_time"] = src["flight_time"].astype(int)
+
+        # Build a temporary bin-mean dataset on the SAME edges/labels as the 'bin' method
+        tmp_bin = (
+            src.groupby_bins(
+                "alt",
+                interpolation_bins,
+                labels=interpolation_grid,
+                restore_coord_dims=True,
+            )
+            .mean()  # skipna=True by default
+            .transpose()
+            .rename({"alt_bins": "alt"})
+        )
+
+        # Apply per-variable mask: keep values where the tmp_bin mean is non-NaN
+        for v in ds_interp.data_vars:
+            da = ds_interp[v]
+            if ("alt" in da.dims) and np.issubdtype(da.dtype, np.number) and (v in tmp_bin):
+                valid = ~np.isnan(tmp_bin[v])
+                ds_interp[v] = da.where(valid)
+
+        # carry launch_time if present
+        if "launch_time" in ds_new:
+            ds_interp["launch_time"] = ds_new["launch_time"]
+
     else:
         raise ValueError(f"Unknown interpolation method: {method}")
 
     return ds_interp
+
 
 
 
@@ -310,13 +608,18 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
     # Recalculate temperature and relative humidity from theta and q
 
     temperature = td.calc_T_from_theta(
-        ds_interp.isel(sounding=0)["theta"].pint.to("K"),
-        ds_interp.isel(sounding=0)["pressure"].pint.to("hPa"),
+        _safe_to(ds_interp.isel(sounding=0)["theta"], "K", default_unit="K"),
+        _safe_to(ds_interp.isel(sounding=0)["pressure"],    "hPa",  default_unit="hPa"),
     )
+
+    print("theta[:5] =", ds_interp.isel(sounding=0)["theta"].values[:5])
+    print("press [:5] =", ds_interp.isel(sounding=0)["pressure"].values[:5])
+    print("T_new[:5]  =", temperature.values[:5])
 
     ds_interp["temperature"] = xr.DataArray(
         temperature.data, dims=dims_1d, coords=coords_1d
     )
+
     ds_interp["temperature"] = ds_interp["temperature"].expand_dims({"sounding": 1})
 
     w = (ds_interp.isel(sounding=0)["specific_humidity"]) / (
