@@ -15,6 +15,7 @@ import thermodynamics as td
 import xarray as xr
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigAttributeError
+from moist_thermodynamics import constants as mtc
 
 logging.debug(f"Pint_xarray version:{pint_xarray.__version__}")
 
@@ -224,6 +225,9 @@ class Sounding:
         else:
             self.profile.insert(10, "ascent_rate", ascent_rate)
 
+
+
+        '''
         # Dew point temperature
         dewpoint = td.convert_rh_to_dewpoint(
             self.profile.temperature.values, self.profile.humidity.values
@@ -242,6 +246,65 @@ class Sounding:
             self.profile.dew_point = dewpoint
         else:
             self.profile.insert(10, "dew_point", dewpoint)
+        '''
+        # Dew point temperature (normalize to plain float °C; NA-safe)
+        dewpoint = td.convert_rh_to_dewpoint(
+            self.profile.temperature.values, self.profile.humidity.values
+        )
+
+        def _to_float_degC(x):
+            import numpy as np
+            # If it's a pint Quantity
+            try:
+                import pint
+                if isinstance(x, pint.Quantity):
+                    try:
+                        return x.to("degC").magnitude.astype("float64")
+                    except Exception:
+                        return (x.to("kelvin").magnitude.astype("float64") - 273.15)
+            except Exception:
+                pass
+            # If it's an array-like (possibly pandas / numpy)
+            arr = getattr(x, "values", x)
+            arr = np.asarray(arr, dtype="float64")
+            # Heuristic: if looks like Kelvin, convert to °C
+            with np.errstate(invalid="ignore"):
+                if np.nanmax(arr) > 200.0:
+                    arr = arr - 273.15
+            return arr
+
+        dp_new = _to_float_degC(dewpoint)
+
+        if "dew_point" in self.profile:
+            logging.warning(
+                "Values for dew point already exist in input file. To ensure consistency, they will be recalculated."
+            )
+
+            dp_old = _to_float_degC(self.profile["dew_point"])
+            m = np.isfinite(dp_old) & np.isfinite(dp_new)
+            if m.any():
+                diff = float(np.nanmean(dp_old[m] - dp_new[m]))  # °C
+                if not (abs(diff) < 50):
+                    raise AssertionError("The difference seems to be large. Are the input units in the config correct?")
+                logging.info(f"Mean difference between calculated and existing dew point: {diff:.2f} °C")
+            else:
+                logging.warning("No overlapping finite values to compare existing vs recalculated dew point.")
+
+            # Overwrite safely (avoid SettingWithCopy)
+            self.profile.loc[:, "dew_point"] = dp_new
+        else:
+            # First-time write in °C
+            self.profile.insert(10, "dew_point", dp_new)
+
+
+
+
+
+
+
+
+
+
 
         # Mixing ratio
         e_s = td.calc_saturation_pressure(self.profile.temperature.values, method="wagner_pruss")
@@ -267,8 +330,8 @@ class Sounding:
         self.get_sonde_type()
         self.get_sonde_serial_number()
 
-    def collect_config(self, config, level):
-        level_dims = {1: "flight_time", 2: "alt"}
+    def collect_config(self, config, vertical_interpolation_axis: str, level):
+        level_dims = {1: "flight_time", 2: f"{vertical_interpolation_axis}"}
         runtime_cfg = OmegaConf.create(
             {
                 "runtime": {
@@ -337,9 +400,29 @@ class Sounding:
                 ds[k].encoding["dtype"] = coord_dtype
         return ds, unset_coords
 
-    def create_dataset(self, config, level=1):
-        merged_conf = self.collect_config(config, level)
+
+    def create_dataset(self, config, vertical_interpolation_axis: str, level=1):
+        merged_conf = self.collect_config(config, vertical_interpolation_axis, level)
+
+        # --- inject runtime dims right before creating the dataset ---
+        from omegaconf import OmegaConf
+
+        axis = vertical_interpolation_axis #"height" if (("height" in self.profile.dims) or ("height" in self.profile.coords)) else "alt"
+        height_coord = np.asarray(self.profile[axis].values).tolist()  # use your actual grid
+
+        n_soundings = int(self.profile.sizes.get("sounding", 1))
+
+        runtime_conf = OmegaConf.create({
+            "runtime": {
+                "sounding_dim": n_soundings,
+                "height_coord": height_coord,   # <— swapped in YAML above
+            }
+        })
+
+        merged_conf = OmegaConf.merge(merged_conf, runtime_conf)
         ds = dc.create_dataset(merged_conf)
+
+        # -------------------------------------------------------------
 
         # Fill dataset with data
         unset_vars = {}
@@ -350,6 +433,7 @@ class Sounding:
                 continue
             if "sounding" not in self.profile[var].dims:
                 self.profile[var] = self.profile[var].expand_dims({"sounding": 1})
+
         for k in ds.data_vars.keys():
             try:
                 int_var = config[f"level{level}"].variables[k].internal_varname
@@ -357,6 +441,7 @@ class Sounding:
                 logging.debug(f"{k} does not seem to have an internal varname")
                 continue
             dims = ds[k].dims
+
             if k == "launch_time":
                 try:
                     ds[k].data = self.profile[int_var].values
@@ -366,19 +451,15 @@ class Sounding:
             elif k == "platform":
                 continue  # will be set at later stage
 
-            # ------------- MOD: robust handling if the source is missing -------------
+            # If source missing: write NaNs with exact target shape
             if int_var not in self.profile.keys():
-                # Create NaNs that EXACTLY match the target variable's dims
                 shape = tuple(ds.sizes[d] for d in ds[k].dims)
                 ds[k].data = np.full(shape, np.nan, dtype=float)
                 continue
-            # -------------------------------------------------------------------------
 
-            # Source exists: assign with units handling and dim ordering as before
+            # Units-aware / shape-aware assignment
             if self.isquantity(self.profile[int_var]):
-                data = (
-                    self.profile[int_var].pint.to(ds[k].attrs.get("units", "")).pint.magnitude
-                )
+                data = self.profile[int_var].pint.to(ds[k].attrs.get("units", "")).pint.magnitude
                 if len(dims) > 1 and "sounding" == dims[1]:
                     ds[k].data = np.array(data).T
                 else:
@@ -388,9 +469,8 @@ class Sounding:
                     ds[k].data = np.array(self.profile[int_var].values).T
                 else:
                     ds[k].data = self.profile[int_var].values
-        ds, unset_coords = self.set_coordinate_data(
-            ds, ds.coords, config[f"level{level}"]
-        )
+
+        ds, unset_coords = self.set_coordinate_data(ds, ds.coords, config[f"level{level}"])
         unset_items = {**unset_vars, **unset_coords}
         ds = self.set_unset_items(ds, unset_items, config, level)
         merged_conf = h.replace_placeholders_cfg(self, merged_conf)
@@ -400,11 +480,100 @@ class Sounding:
             _cfg = h.remove_missing_cfg(merged_conf["global_attrs"])
             ds.attrs = _cfg
 
-        # --- NEW: ensure 'alt' is a coordinate if present as a variable ---
-        if "alt" in ds.data_vars and "alt" not in ds.coords:
-            ds = ds.set_coords("alt")
+
+
+
+        # --- Overwrite ds['height'] with PTU result if available in the profile (DF or XR.Dataset) ---
+        def _profile_has(name):
+            if isinstance(self.profile, pd.DataFrame):
+                return name in self.profile.columns
+            if isinstance(self.profile, xr.Dataset):
+                return (name in self.profile.variables) or (name in self.profile.coords)
+            return False
+
+        def _profile_values(name, dtype="float32"):
+            if isinstance(self.profile, pd.DataFrame):
+                return np.asarray(self.profile[name].values, dtype=dtype)
+            elif isinstance(self.profile, xr.Dataset):
+                return np.asarray(self.profile[name].values, dtype=dtype)
+            else:
+                raise TypeError("self.profile must be a pandas.DataFrame or xarray.Dataset")
+
+        def _ensure_1d(v: np.ndarray) -> np.ndarray:
+            # (1, L) -> (L,), (L,) -> (L,)
+            if v.ndim == 2 and v.shape[0] == 1:
+                return v[0]
+            return v.squeeze()
+
+        def _set_height_with_dims(ds: xr.Dataset, vals_1d: np.ndarray, n_snd: int, n_lvl: int):
+            """Replace ds['height'] respecting its current dims (if present)."""
+            if "height" in ds:
+                dims_h = ds["height"].dims
+            else:
+                # if not present, prefer ('level',)
+                dims_h = ("level",)
+
+            if dims_h == ("level",):
+                if vals_1d.shape[0] != n_lvl:
+                    raise ValueError(f"'height' length {vals_1d.shape[0]} != level dim {n_lvl}")
+                ds["height"] = (("level",), vals_1d)
+
+            elif dims_h == ("sounding", "level"):
+                if vals_1d.shape[0] != n_lvl:
+                    raise ValueError(f"'height' length {vals_1d.shape[0]} != level dim {n_lvl}")
+                arr = vals_1d[None, :] if n_snd == 1 else np.broadcast_to(vals_1d[None, :], (n_snd, n_lvl))
+                ds["height"] = (("sounding", "level"), arr)
+
+            elif dims_h == ("level", "sounding"):
+                if vals_1d.shape[0] != n_lvl:
+                    raise ValueError(f"'height' length {vals_1d.shape[0]} != level dim {n_lvl}")
+                arr = vals_1d[:, None] if n_snd == 1 else np.broadcast_to(vals_1d[:, None], (n_lvl, n_snd))
+                ds["height"] = (("level", "sounding"), arr)
+
+            else:
+                # last resort: attach to last dim if lengths match
+                last_dim = ds["height"].dims[-1] if "height" in ds else list(ds.dims)[-1]
+                if ds.dims[last_dim] == vals_1d.shape[-1]:
+                    ds["height"] = ((last_dim,), vals_1d)
+                else:
+                    raise ValueError(f"Cannot align 'height' to ds dims: {ds.dims} with vals {vals_1d.shape}")
+
+        if _profile_has("height_ptu"):
+            vals = _profile_values("height_ptu", dtype="float32")
+            vals = np.asarray(vals, dtype="float32")
+
+            n_snd = int(ds.dims.get("sounding", 1))
+            n_lvl = int(ds.dims.get("level", vals.shape[-1]))
+
+            vals_1d = _ensure_1d(vals)
+            if ("level" in ds.dims) and (vals_1d.shape[0] != n_lvl):
+                raise ValueError(f"'height_ptu' length {vals_1d.shape[0]} != level dim {n_lvl}")
+
+            _set_height_with_dims(ds, vals_1d, n_snd, n_lvl)
+
+            # Metadata for final 'height'
+            ds["height"].attrs.update({
+                "standard_name": "geopotential_height",
+                "long_name":     "geopotential height from PTU",
+                "units":         "m",
+                "source":        "PTU via hypsometric equation",
+            })
+
+            # Remove any leftover 'height_ptu'
+            if "height_ptu" in ds.variables or "height_ptu" in ds.coords:
+                ds = ds.drop_vars("height_ptu")
+
+        # --- Promote extra variables to coordinates if present ---
+        for coord_var in ["alt", "height"]:
+            if coord_var in ds.data_vars and coord_var not in ds.coords:
+                ds = ds.set_coords(coord_var)
 
         self.dataset = ds
+
+
+
+
+
 
     def get_direction(self):
         if self.profile.ascent_flag.values[0] == 0:
@@ -447,3 +616,156 @@ class Sounding:
         self.dataset.encoding["unlimited_dims"] = ["sounding"]
         self.dataset.to_netcdf(output)
         logging.info(f"Sounding written to {output}")
+
+
+    def ensure_ptu_height_pre_split(self, level=1):
+        """
+        Compute PTU-derived geopotential height on the full profile *before* splitting.
+        Writes plain-float columns only:
+        p [Pa], ta [K], alt [m] (if missing), and height_ptu [m].
+        """
+        import numpy as np
+        import logging
+
+        is_level1 = (level == 1)
+        reader_type = str(self.meta_data.get("reader_type", self.meta_data.get("source", ""))).lower()
+        if not (is_level1 and ".cor" in reader_type):
+            return  # only act on Meteomodem .cor Level-1
+
+        prof = self.profile
+
+        # --- resolve standardized column names that your reader already maps to ---
+        p_name   = "pressure"     if "pressure"     in prof.columns else ("p"    if "p"    in prof.columns else None)
+        t_name   = "temperature"  if "temperature"  in prof.columns else ("ta"   if "ta"   in prof.columns else None)
+        alt_name = "height"       if "height"       in prof.columns else ("alt"  if "alt"  in prof.columns else None)
+
+        if p_name is None or t_name is None:
+            logging.warning("[pysonde.sounding.py]: PTU height skipped — missing pressure (%s) or temperature (%s).",
+                            p_name, t_name)
+            return
+
+        # --- pull as plain floats, no pint ---
+        def _to_float(col):
+            a = prof[col]
+            # pint-pandas column -> magnitude
+            try:
+                import pint_pandas as pp
+                if isinstance(a.dtype, pp.pint_array.PintType):
+                    return a.pint.magnitude.astype("float64")
+            except Exception:
+                pass
+            # xarray not expected here; DataFrame .values gives numpy
+            return getattr(a, "values", a).astype("float64")
+
+        p_raw = _to_float(p_name)   # likely hPa from .cor reader, but your reader already standardized → check below
+        T_raw = _to_float(t_name)   # likely °C standardized to temperature; we’ll normalize safely
+
+        # --- unit heuristics to plain floats ---
+        # pressure: if max < 2000 → hPa, convert to Pa; else assume already Pa
+        p_pa = (p_raw * 100.0) if (np.nanmax(p_raw) < 2000.0) else p_raw
+        # temperature: if max < 200 → °C, convert to K; else assume already K
+        ta_K = (T_raw + 273.15) if (np.nanmax(T_raw) < 200.0) else T_raw
+
+        # persist normalized columns as plain floats
+        self.profile.loc[:, "p"]  = p_pa
+        self.profile.loc[:, "ta"] = ta_K
+
+        # optional alt anchor (plain floats)
+        z0 = None
+        if alt_name is not None:
+            alt_val = _to_float(alt_name)
+            if "alt" not in self.profile.columns:
+                self.profile.loc[:, "alt"] = alt_val.astype("float32")
+            finite_idx = np.where(np.isfinite(alt_val))[0]
+            if finite_idx.size > 0:
+                z0 = float(alt_val[finite_idx[0]])
+
+        # optional mixing ratio (plain floats if present; not required)
+        mr = None
+        if "mr" in self.profile.columns:
+            mr = _to_float("mr")
+
+        # compute PTU height (returns numpy floats)
+        z_ptu = self._ptu_geopotential_height(self.profile["p"].values, self.profile["ta"].values, mr=mr, z0=z0)
+        self.profile.loc[:, "height_ptu"] = z_ptu.astype("float32")
+
+        # --- DEBUG: verify plain-float columns (no pint registries) ---
+        for col in ("p", "ta", "alt", "height_ptu"):
+            if col in self.profile.columns:
+                s = self.profile[col]
+                is_pint = False
+                try:
+                    import pint_pandas as pp
+                    is_pint = isinstance(s.dtype, pp.pint_array.PintType)
+                except Exception:
+                    pass
+                print(f"[PTU DEBUG] {col}: dtype={getattr(s, 'dtype', None)} pint_col={is_pint}")
+
+
+        logging.info("[pysonde.sounding.py]: PTU height computed into 'height_ptu'. (p, ta, alt written as plain floats)")
+
+
+    def _ptu_geopotential_height(self, p, T, mr=None, z0=None):
+        """
+        Hypsometric integration along the full time order.
+        Works for both ascent (p decreasing) and descent (p increasing).
+        Returns a z array aligned to the original indexing; invalid samples are NaN.
+        """
+        import numpy as np
+
+        p  = np.asarray(p,  dtype="float64")
+        T  = np.asarray(T,  dtype="float64")
+        mr = None if mr is None else np.asarray(mr, dtype="float64")
+
+        n = p.size
+        z = np.full(n, np.nan, dtype="float64")
+        if n == 0:
+            return z
+
+        # Reference height
+        if z0 is None:
+            z0 = 0.0
+            try:
+                a0 = np.asarray(self.profile["alt"]).astype("float64")
+                i0a = np.where(np.isfinite(a0))[0]
+                if i0a.size:
+                    z0 = float(a0[i0a[0]])
+            except Exception:
+                pass
+
+        # Basic QC masks per-sample
+        m = np.isfinite(p) & np.isfinite(T) & (p > 100.0) & (T > 150.0) & (T < 330.0)
+        if mr is not None:
+            m &= np.isfinite(mr) & (mr >= 0.0) & (mr < 0.05)
+
+        if not np.any(m):
+            return z
+
+        # Virtual temperature
+        if mr is not None:
+            q = mr / (1.0 + mr)
+            Tv = T * (1.0 + 0.61 * q)
+        else:
+            Tv = T
+
+        # Pairwise mask: both ends valid
+        vpair = m[:-1] & m[1:]
+
+        # Pairwise hypsometric steps (sign handles both directions)
+        Rd = 287.05
+        g  = 9.80665
+        Tv_bar = 0.5 * (Tv[:-1] + Tv[1:])
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ln_ratio = np.log(p[:-1] / p[1:])
+
+        dz = (Rd / g) * Tv_bar * ln_ratio
+        dz[~vpair] = 0.0  # don’t advance across invalid gaps
+
+        # Cumulative height relative to first valid sample
+        cum = np.concatenate(([0.0], np.cumsum(dz)))
+        i0 = int(np.where(m)[0][0])
+        z = z0 + (cum - cum[i0])
+
+        # Invalidate samples where single-point QC failed
+        z[~m] = np.nan
+        return z

@@ -6,6 +6,7 @@ Script to convert sounding files from different sources
 to netCDF
 """
 
+import matplotlib.pyplot as plt
 import argparse
 import logging
 import sys
@@ -65,8 +66,17 @@ def get_args():
         "-m",
         "--method",
         metavar="METHOD",
-        help="Interpolation method ('bin' (default), 'linear', 'linear_masked')",
+        help="Interpolation method ('bin', 'linear', 'linear_masked')",
         default="linear_masked",
+        required=False,
+    )
+
+    parser.add_argument(
+        "-ia",
+        "--interp_axis",
+        metavar="INTERPOLATION_AXIS",
+        help="Interpolation along which axis ('alt', 'height')",
+        default="height",
         required=False,
     )
 
@@ -139,12 +149,14 @@ def main(args=None):
 
     for ifile, file in enumerate(tqdm.tqdm(input_files)):
         logging.debug("Reading file number {}".format(ifile))
-
+    
         sounding = reader.read(file)
 
         if isinstance(reader, readers.readers.MW41) or isinstance(
             reader, readers.readers.METEOMODEM
         ):
+            # NEW — computes 'height' on full profile
+            sounding.ensure_ptu_height_pre_split(level=1)         
             # Split sounding into ascending and descending branch
             sounding_asc, sounding_dsc = sounding.split_by_direction()
             for snd in [sounding_asc, sounding_dsc]:
@@ -158,8 +170,9 @@ def main(args=None):
                     continue
                 snd.calculate_additional_variables(cfg)
                 snd.convert_sounding_df2ds()
-                snd.create_dataset(cfg)
+                snd.create_dataset(cfg, vertical_interpolation_axis=args["interp_axis"])
                 snd.export(args["output"], cfg)
+
         elif isinstance(reader, readers.readers.pysondeL1):
             cfg = h.replace_placeholders_cfg_level2(cfg)
 
@@ -172,8 +185,8 @@ def main(args=None):
             ds_input = ds.copy()
 
             # Check monotonic ascent/descent
-            if np.all(np.diff(ds.isel(level=slice(20, -1)).alt.values) > 0) or np.all(
-                np.diff(ds.isel(level=slice(20, -1)).alt.values) < 0
+            if np.all(np.diff(ds.isel(level=slice(20, -1))[args["interp_axis"]].values) > 0) or np.all(
+                np.diff(ds.isel(level=slice(20, -1))[args["interp_axis"]].values) < 0
             ):
                 logging.debug("Sounding is monotonic ascending/descending")
             else:
@@ -185,7 +198,7 @@ def main(args=None):
             # the geopotential height is not a measured coordinate and
             # the same height can occur at different pressure levels
             # here the first occurrence is used
-            _, uniq_altitude_idx = np.unique(ds.alt.values, return_index=True)
+            _, uniq_altitude_idx = np.unique(ds[args["interp_axis"]].values, return_index=True)
             ds = ds.isel({"level": uniq_altitude_idx})
 
             # Consistent platform test
@@ -199,14 +212,29 @@ def main(args=None):
                 )
 
             # Unique levels test
-            if len(ds.alt) != len(np.unique(ds.alt)):
+            if len(ds[args["interp_axis"]]) != len(np.unique(ds[args["interp_axis"]])):
                 logging.error("Altitude levels are not unique of {}".format(file))
                 break
+            
 
             # Prepare some data that cannot be linearly interpolated
             ds, ds_new = p2.prepare_data_for_interpolation(
-                ds, sounding.unitregistry, reader.variable_name_mapping_output.items()
+                ds, 
+                sounding.unitregistry, 
+                args["interp_axis"], 
+                reader.variable_name_mapping_output.items(),
             )
+
+
+
+            axis = args["interp_axis"]
+            if axis not in {"alt", "height"}:
+                raise ValueError(f"--interpolation must be 'alt' or 'height', got {axis!r}")
+            if axis not in ds_new:
+                raise ValueError(f"Chosen axis {axis!r} not found in dataset.")
+            # Make sure it is a coordinate (not just a data_var)
+            if axis in ds_new and axis not in ds_new.coords:
+                ds_new = ds_new.set_coords(axis)
 
             # Interpolation
             interpolation_grid = np.arange(
@@ -218,6 +246,7 @@ def main(args=None):
                 ds_new,
                 args["method"],
                 interpolation_grid,
+                args["interp_axis"],
                 sounding,
                 reader.variable_name_mapping_output.items(),
                 cfg,
@@ -227,21 +256,31 @@ def main(args=None):
                 ds_interp,
                 ds,
                 ds_input,
+                args["interp_axis"],
                 reader.variable_name_mapping_output.items(),
                 cfg,
             )
 
             if args["method"] in ("bin"):
                 ds_interp = p2.count_number_of_measurement_within_bin(
-                    ds_interp, ds_new, cfg, interpolation_grid
+                    ds_interp, 
+                    ds_new, 
+                    cfg, 
+                    interpolation_grid,
+                    args["interp_axis"],
                 )
 
             ds_interp = p2.finalize_attrs(
-                ds_interp, ds, cfg, file, reader.variable_name_mapping_output.items()
+                ds_interp, 
+                ds, 
+                cfg, 
+                file, 
+                reader.variable_name_mapping_output.items(), 
+                args["interp_axis"],
             )
 
             sounding.profile = ds_interp
-            sounding.create_dataset(cfg, level=2)
+            sounding.create_dataset(cfg, vertical_interpolation_axis=args["interp_axis"], level=2)
             sounding.get_direction()
             sounding.set_launchtime()
             sounding.export(args["output"], cfg)

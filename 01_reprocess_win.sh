@@ -28,8 +28,9 @@
 #v4.0.4_raw --> Santander version, final fixed cor files
 #v4.0.5_raw --> with linear_masked interpolation
 #v4.0.6_raw --> with new linear_masked interpolation trying to fix extra nan-values 
+#v4.0.7_raw --> changed pysonde to extract and interpolate based on ptu height. Ptu height calculation for Meteomodem
 
-DATASET_VERSION="RS_ORCESTRA_level2_v4.0.6_raw.nc"
+DATASET_VERSION="RS_ORCESTRA_level2_v4.0.7_raw.nc"
 
 BASE_PATH="/Users/marius/ownCloud/PhD/12_Orcestra_Campaign"
 CONFIG_PATH="$BASE_PATH/pysonde_for_datapaper/pysonde/config"
@@ -90,6 +91,7 @@ if $PROCESS_L0_L1; then
     : > "$METEOR_LOG_FILE"
     : > "$INMG_LOG_FILE"
 
+
     # Processing BCO files
     BCO_FILES=("$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level0/BCO/"*.mwx)
     BCO_TOTAL=${#BCO_FILES[@]}
@@ -129,6 +131,7 @@ if $PROCESS_L0_L1; then
         echo -e "\n--------------------------------------" | tee -a "$METEOR_LOG_FILE"
     done
     echo -e "\nAll Meteor files processed." | tee -a "$METEOR_LOG_FILE"
+
 
     # Processing INMG files
     INMG_FILES=("$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level0/INMG/"*.cor)
@@ -209,7 +212,7 @@ if $PROCESS_L1_L2; then
         echo -e "\n--------------------------------------" | tee -a "$METEOR_L2_LOG_FILE"
     done
     echo -e "\nAll Meteor level1 to level2 files processed." | tee -a "$METEOR_L2_LOG_FILE"
-
+    
     # Processing INMG files
     INMG_L2_FILES=("$BASE_PATH/00_ORCESTRA_Radiosondes_Winkler/level1/INMG/"*.nc)
     INMG_L2_TOTAL=${#INMG_L2_FILES[@]}

@@ -37,17 +37,17 @@ coordinates:
         attrs:
             units: ""
         internal_varname: "sounding"
-    alt:
+    height:
         dimension: ${runtime.level_dim}
         attrs:
-            standard_name: "altitude"
-            long_name: "geometric altitude (GPS)"
+            standard_name: "geopotential_height"
+            long_name: "geopotential height from PTU"
             units: "m"
             axis: "Z"
             positive: "up"
         encodings:
             dtype: "float32"
-        internal_varname: "alt"
+        internal_varname: "height"
 variables:
     alt:
         attrs:
@@ -60,20 +60,9 @@ variables:
             dtype: "float32"
             _FillValue: False
         coordinates:
-            - alt
-        internal_varname: "alt"
-    height_ptu:
-        attrs:
-            standard_name: "geopotential_height"
-            long_name: "geopotential height from PTU (barometric)"
-            units: "m"
-            coordinates: "lon lat alt flight_time launch_time sounding"
-        encodings:
-            dtype: "float32"
-        coordinates:
             - sounding
-            - alt
-        internal_varname: "height_ptu"
+            - height
+        internal_varname: "altitude_WGS84"
     launch_time:
         attrs:
             standard_name: "time"
@@ -124,30 +113,30 @@ variables:
         attrs:
             standard_name: "time"
             long_name: "time at pressure level"
-            coordinates: "lon lat alt launch_time sounding"
+            coordinates: "lon lat height launch_time sounding"
             ancillary_variables: "N_ptu m_ptu"
-            cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
+            cell_methods: "height: mean (interval: 10 m comment: m_ptu)"
         encodings:
             units: "seconds since 2020-01-01"
             calendar: "proleptic_gregorian"
             dtype: "float64"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname : "flight_time"
     p:
         attrs:
             standard_name: "air_pressure"
             long_name: "pressure"
             units: "Pa"
-            coordinates: "lon lat alt flight_time launch_time sounding"
+            coordinates: "lon lat height flight_time launch_time sounding"
             ancillary_variables: "N_ptu m_ptu"
-            cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
+            cell_methods: "height: mean (interval: 10 m comment: m_ptu)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "pressure"
     lat:
         attrs:
@@ -156,12 +145,12 @@ variables:
             axis: "Y"
             units: "degree_north"
             ancillary_variables: "N_gps m_gps"
-            cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
+            cell_methods: "height: mean (interval: 10 m comment: m_gps)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "latitude"
     lon:
         attrs:
@@ -170,39 +159,39 @@ variables:
             axis: "X"
             units: "degree_east"
             ancillary_variables: "N_gps m_gps"
-            cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
+            cell_methods: "height: mean (interval: 10 m comment: m_gps)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "longitude"
     dz:
         attrs:
             long_name: "ascent/descent rate of measuring device"
             description: "calculated from interpolated geopotential height changes (artifical rate)"
             units: "m/s"
-            coordinates: "lon lat alt flight_time launch_time sounding"
+            coordinates: "lon lat height flight_time launch_time sounding"
             ancillary_variables: "N_ptu m_ptu"
-            cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
+            cell_methods: "height: mean (interval: 10 m comment: m_ptu)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname : "ascent_rate"
     ta:
         attrs:
             standard_name: "air_temperature"
             long_name: "air temperature"
             units: "K"
-            coordinates: "lon lat alt flight_time launch_time sounding"
-            cell_methods: "alt: point (derived from averaged theta)"
+            coordinates: "lon lat height flight_time launch_time sounding"
+            cell_methods: "height: point (derived from averaged theta)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname : "temperature"
     dp:
         attrs:
@@ -211,25 +200,25 @@ variables:
             units: "K"
             coordinates: "lon lat flight_time launch_time"
             ancillary_variables: "N_ptu m_ptu"
-            cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
+            cell_methods: "height: mean (interval: 10 m comment: m_ptu)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "dewpoint"
     wspd:
         attrs:
             standard_name: "wind_speed"
             long_name: "wind speed"
             units: "m/s"
-            cell_methods: "alt: point (derived from averaged u, v)"
+            cell_methods: "height: point (derived from averaged u, v)"
             coordinates: "launch_time flight_time lon lat"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "wind_speed"
     u:
         attrs:
@@ -237,13 +226,13 @@ variables:
             long_name: "u-component of the wind"
             units: "m/s"
             ancillary_variables: "N_gps m_gps"
-            cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
+            cell_methods: "height: mean (interval: 10 m comment: m_gps)"
             coordinates: "launch_time flight_time lon lat"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "wind_u"
     v:
         attrs:
@@ -251,13 +240,13 @@ variables:
             long_name: "v-component of the wind"
             units: "m/s"
             ancillary_variables: "N_gps m_gps"
-            cell_methods: "alt: mean (interval: 10 m comment: m_gps)"
+            cell_methods: "height: mean (interval: 10 m comment: m_gps)"
             coordinates: "launch_time flight_time lon lat"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "wind_v"
     mr:
         attrs:
@@ -265,13 +254,13 @@ variables:
             long_name: "water vapor mixing ratio"
             units: "1"
             ancillary_variables: "N_ptu"
-            cell_methods: "alt: point (derived from averaged q)"
+            cell_methods: "height: point (derived from averaged q)"
             coordinates: "launch_time flight_time lon lat p"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname : "mixing_ratio"
     theta:
         attrs:
@@ -280,12 +269,12 @@ variables:
             units: "K"
             coordinates: "lon lat flight_time launch_time"
             ancillary_variables: "N_ptu m_ptu"
-            cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
+            cell_methods: "height: mean (interval: 10 m comment: m_ptu)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "theta"
     q:
         attrs:
@@ -293,13 +282,13 @@ variables:
             long_name: "specific humidity"
             units: "1"
             ancillary_variables: "N_ptu m_ptu"
-            cell_methods: "alt: mean (interval: 10 m comment: m_ptu)"
+            cell_methods: "height: mean (interval: 10 m comment: m_ptu)"
             coordinates: "launch_time flight_time lon lat p"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "specific_humidity"
     wdir:
         attrs:
@@ -307,12 +296,12 @@ variables:
             long_name: "wind direction"
             units: "degree"
             coordinates: "launch_time flight_time lon lat"
-            cell_methods: "alt: point (derived from averaged u, v)"
+            cell_methods: "height: point (derived from averaged u, v)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "wind_direction"
     rh:
         attrs:
@@ -320,12 +309,12 @@ variables:
             long_name: "relative humidity"
             units: "1"
             coordinates: "lon lat flight_time launch_time"
-            cell_methods: "alt: point (derived from averaged q, T, p)"
+            cell_methods: "height: point (derived from averaged q, T, p)"
         encodings:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname : "relative_humidity"
     N_ptu:
         attrs:
@@ -337,7 +326,7 @@ variables:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "N_ptu"
     N_gps:
         attrs:
@@ -349,7 +338,7 @@ variables:
             dtype: "float32"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "N_gps"
     m_ptu:
         attrs:
@@ -362,7 +351,7 @@ variables:
             dtype: "int8"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "m_ptu"
     m_gps:
         attrs:
@@ -375,5 +364,5 @@ variables:
             dtype: "int8"
         coordinates:
             - sounding
-            - alt
+            - height
         internal_varname: "m_gps"

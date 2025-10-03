@@ -102,6 +102,7 @@ def calc_saturation_pressure(temperature, method="hardy1998"):
 
     return e_sw
 
+'''
 def calc_wv_mixing_ratio(sounding, vapor_pressure):
     """
     Calculate water vapor mixing ratio
@@ -145,6 +146,70 @@ def calc_wv_mixing_ratio(sounding, vapor_pressure):
         pass  # Return as-is if units are missing
 
     return wv_mix_ratio
+'''
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+import pint
+import pint_pandas as pp
+
+def calc_wv_mixing_ratio(sounding, vapor_pressure):
+    """
+    Calculate water vapor mixing ratio w = 0.622 e / (p - e)
+    Returns a pandas.Series if 'sounding' is a DataFrame,
+    else returns an xarray.DataArray aligned to the pressure variable.
+    """
+
+    def _pa_mag(x):
+        # pint-xarray DataArray
+        if isinstance(x, xr.DataArray) and hasattr(x, "pint"):
+            return x.pint.to("Pa").pint.magnitude
+        # pint.Quantity
+        if isinstance(x, pint.Quantity):
+            return x.to("Pa").magnitude
+        # pandas PintArray
+        if isinstance(x, pp.pint_array.PintArray):
+            return x.quantity.to("Pa").magnitude
+        # plain array / scalar
+        return getattr(x, "values", x)
+
+    # Pick pressure column from sounding (DataFrame or Dataset)
+    if isinstance(sounding, pd.DataFrame):
+        if "p" in sounding:
+            p_raw = sounding["p"]
+        elif "pressure" in sounding:
+            p_raw = sounding["pressure"]
+        else:
+            raise KeyError("No valid pressure variable found in the dataset! Expected 'p' or 'pressure'.")
+        p_pa = _pa_mag(p_raw).astype(float)
+        e_pa = _pa_mag(vapor_pressure).astype(float)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            w = 0.622 * e_pa / (p_pa - e_pa)
+
+        return pd.Series(w, index=sounding.index, name="mr")
+
+    elif isinstance(sounding, xr.Dataset):
+        if "p" in sounding:
+            pv = sounding["p"]
+        elif "pressure" in sounding:
+            pv = sounding["pressure"]
+        else:
+            raise KeyError("No valid pressure variable found in the dataset! Expected 'p' or 'pressure'.")
+
+        p_pa = _pa_mag(pv).astype(float)
+        e_pa = _pa_mag(vapor_pressure).astype(float)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            w = 0.622 * e_pa / (p_pa - e_pa)
+
+        da = xr.DataArray(w, dims=pv.dims, coords=pv.coords, name="mr")
+        da.attrs["units"] = "kg kg-1"
+        return da
+
+    else:
+        raise TypeError("sounding must be a pandas DataFrame or xarray Dataset")
 
 
 def calc_theta_from_T(T, p):

@@ -2,6 +2,7 @@
 Functions for post-processing data
 """
 
+import matplotlib.pyplot as plt
 import metpy.calc
 import metpy.calc as mpcalc
 import metpy.interpolate as mpinterp
@@ -330,6 +331,7 @@ def pressure_interpolation(
 
     # Exclude heights outside of the intersection of measurements heights
     # and output_altitudes
+
     altitudes_above_measurements = new_alt > max(altitudes)
     range_of_alt_max = (
         np.min(np.where(altitudes_above_measurements | (new_alt == new_alt[-1]))) - 1

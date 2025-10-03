@@ -2,6 +2,7 @@ import logging
 import os
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import metpy.calc as mpcalc
 import numpy as np
 import pandas as pd
@@ -68,7 +69,7 @@ def _values_in_unit(da, target_unit: str, default_unit: str | None = None):
     return arr
 
 
-def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
+def prepare_data_for_interpolation(ds, uni, vertical_interpolation_axis, variables, reader=pysondeL1):
     u, v = mh.get_wind_components(ds.wdir, ds.wspd)
     ds["u"] = xr.DataArray(u.data, dims=["level"])
     ds["v"] = xr.DataArray(v.data, dims=["level"])
@@ -95,17 +96,17 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
     # --- Make 'alt' the vertical dimension for the entire dataset ---
     if "level" in ds.dims:
         # ensure 'alt' is a coordinate (if it's currently a data_var)
-        if "alt" in ds and "alt" not in ds.coords:
-            ds = ds.set_coords("alt")
+        if vertical_interpolation_axis in ds and vertical_interpolation_axis not in ds.coords:
+            ds = ds.set_coords(vertical_interpolation_axis)
 
         # preferred path: swap_dims when 'alt' is a 1-D coord over 'level'
-        if "alt" in ds.coords and ds["alt"].dims == ("level",):
-            ds = ds.swap_dims({"level": "alt"})
+        if vertical_interpolation_axis in ds.coords and ds[vertical_interpolation_axis].dims == ("level",):
+            ds = ds.swap_dims({"level": vertical_interpolation_axis})
         else:
             # fallback: if an 'alt' data_var conflicts, rename it temporarily, then rename the dim
-            if "alt" in ds.variables and "alt" not in ds.dims:
-                ds = ds.rename({"alt": "alt_var"})
-            ds = ds.rename({"level": "alt"})
+            if vertical_interpolation_axis in ds.variables and vertical_interpolation_axis not in ds.dims:
+                ds = ds.rename({vertical_interpolation_axis: "alt_var"})
+            ds = ds.rename({"level": vertical_interpolation_axis})
     # ----------------------------------------------------------------
 
     # Thermodynamics on the dataset now using 'alt' as the vertical dim
@@ -132,8 +133,8 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
     ds_new["specific_humidity"] = q.reset_coords(drop=True)
 
     # NEW: carry PTU geopotential height into L2 (NaNs for Meteomodem)
-    if "height_ptu" in ds:
-        ds_new["height_ptu"] = ds["height_ptu"]
+    #if "height_ptu" in ds:
+    #    ds_new["height_ptu"] = ds["height_ptu"]
 
     # Carry over remaining variables from ds (that aren't already present)
     for var in ds.data_vars:
@@ -157,7 +158,8 @@ def prepare_data_for_interpolation(ds, uni, variables, reader=pysondeL1):
 
     return ds, ds_new
 
-def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
+
+def interpolation(ds_new, method, interpolation_grid, vertical_interpolation_axis, sounding, variables, cfg):
     """
     Interpolate/bin Level-2 dataset along GPS altitude 'alt'.
 
@@ -185,18 +187,21 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
         print("[pysonde] Using vertical interpolation method: linear")
 
         # --- clean & sort only by 'alt' ---
-        ds_sorted = ds_new.sortby("alt")
-        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted["alt"]), drop=True)
+        ds_sorted = ds_new.sortby(vertical_interpolation_axis)
+        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted[vertical_interpolation_axis]), drop=True)
 
         # Interpolate on the target alt grid
-        ds_interp = ds_sorted.interp(alt=interpolation_grid, method="linear")
+        ds_interp = ds_sorted.interp(
+            {vertical_interpolation_axis: interpolation_grid},
+            method="linear"
+            )
 
         print("pressure before:", ds_sorted.pressure.values)
         # --- robust log-p interpolation to preserve p(z) profile ---
         p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
-        if (p_name is not None) and ("alt" in ds_new.dims or "alt" in ds_new.coords):
+        if (p_name is not None) and (vertical_interpolation_axis in ds_new.dims or vertical_interpolation_axis in ds_new.coords):
             p_da = ds_sorted[p_name]
-            z_da = ds_sorted["alt"]
+            z_da = ds_sorted[vertical_interpolation_axis]
 
             # reduce to 1D along alt if needed
             if "sounding" in p_da.dims:
@@ -214,7 +219,7 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
             if z_src.size >= 2:
                 order = np.argsort(z_src)
                 z_src, p_src = z_src[order], p_src[order]
-                z_out = np.asarray(ds_interp["alt"].values).ravel()
+                z_out = np.asarray(ds_interp[vertical_interpolation_axis].values).ravel()
                 # print("\nz_src:", z_src)
                 # print("\np_src:", p_src)
                 # print("\nz_out:", z_out)
@@ -249,8 +254,8 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
 
                 ds_interp[p_name] = xr.DataArray(
                     p_out,
-                    dims=("alt",),
-                    coords={"alt": ds_interp["alt"].values},
+                    dims=(vertical_interpolation_axis,),
+                    coords={vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].values},
                     attrs={**ds_new[p_name].attrs, "units": "hPa"},
                 )
         # print("pressure after:", ds_interp.pressure.values)
@@ -334,21 +339,20 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
 
         # Use labels=interpolation_grid so resulting coord is numeric (bin centers)
         ds_interp = ds_new.groupby_bins(
-            "alt",
+            vertical_interpolation_axis,
             interpolation_bins,
             labels=interpolation_grid,
             restore_coord_dims=True,
         ).mean()
 
-        # xarray returns 'alt_bins' -> rename to 'alt' (numeric coord already)
         ds_interp = ds_interp.transpose()
-        ds_interp = ds_interp.rename({"alt_bins": "alt"})
+        ds_interp = ds_interp.rename({f"{vertical_interpolation_axis}_bins": vertical_interpolation_axis})
 
         # Create bounds variable (lower, upper] per CF-ish convention
-        ds_interp["alt_bnds"] = xr.DataArray(
+        ds_interp[f"{vertical_interpolation_axis}_bnds"] = xr.DataArray(
             np.array([interpolation_bins[:-1], interpolation_bins[1:]]).T,
-            dims=["alt", "nv"],
-            coords={"alt": ds_interp.alt.data},
+            dims=[vertical_interpolation_axis, "nv"],
+            coords={vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].data},
         )
 
         # carry launch_time forward
@@ -357,23 +361,25 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
 
     elif method == "linear_masked":
         print("[pysonde] Using vertical interpolation method: linear_masked")
+        print("[INERPOLATION]: I am going to interpolate over:", vertical_interpolation_axis)
         # --- 1) Do exactly what 'linear' does (preserve flight_time, interp, robust log-p) ---
 
+
         # drop NaNs & sort by altitude (same as linear)
-        ds_sorted = ds_new.sortby("alt")
-        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted["alt"]), drop=True)
+        ds_sorted = ds_new.sortby(vertical_interpolation_axis)
+        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted[vertical_interpolation_axis]), drop=True)
 
         # preserve flight_time across interpolation (datetime -> int64 ns -> datetime)
-        if "flight_time" in ds_sorted.variables and ("alt" in ds_sorted["flight_time"].dims):
+        if "flight_time" in ds_sorted.variables and (vertical_interpolation_axis in ds_sorted["flight_time"].dims):
             ds_lin = ds_sorted.copy()
             ds_lin["flight_time_ns"] = ds_lin["flight_time"].astype("datetime64[ns]").astype("int64")
             ds_lin = ds_lin.drop_vars("flight_time")
 
             # pre-fill internal NaNs along alt so .interp doesn't propagate gaps
-            ds_filled = ds_lin.interpolate_na(dim="alt", method="linear", use_coordinate=True)
+            ds_filled = ds_lin.interpolate_na(dim=vertical_interpolation_axis, method="linear", use_coordinate=True)
 
             ds_interp = ds_filled.interp(
-                alt=interpolation_grid,
+                {vertical_interpolation_axis: interpolation_grid},
                 method="linear",
                 kwargs={"fill_value": "extrapolate"},
             )
@@ -381,18 +387,19 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
             ds_interp["flight_time"] = ds_interp["flight_time_ns"].astype("datetime64[ns]")
             ds_interp = ds_interp.drop_vars("flight_time_ns")
         else:
-            ds_filled = ds_sorted.interpolate_na(dim="alt", method="linear", use_coordinate=True)
+            ds_filled = ds_sorted.interpolate_na(dim=vertical_interpolation_axis, method="linear", use_coordinate=True)
             ds_interp = ds_filled.interp(
-                alt=interpolation_grid,
+                {vertical_interpolation_axis: interpolation_grid},
                 method="linear",
                 kwargs={"fill_value": "extrapolate"},
             )
+            
 
         # --- robust log-p interpolation to preserve p(z) profile (aligned with 'linear') ---
         p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
-        if (p_name is not None) and ("alt" in ds_new.dims or "alt" in ds_new.coords):
+        if (p_name is not None) and (vertical_interpolation_axis in ds_new.dims or vertical_interpolation_axis in ds_new.coords):
             p_da = ds_sorted[p_name]
-            z_da = ds_sorted["alt"]
+            z_da = ds_sorted[vertical_interpolation_axis]
 
             # reduce to 1D along alt if needed
             if "sounding" in p_da.dims:
@@ -410,7 +417,7 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
             if z_src.size >= 2:
                 order = np.argsort(z_src)
                 z_src, p_src = z_src[order], p_src[order]
-                z_out = np.asarray(ds_interp["alt"].values).ravel()
+                z_out = np.asarray(ds_interp[vertical_interpolation_axis].values).ravel()
 
                 # DEBUG prints (optional)
                 # print("\nz_src:", z_src)
@@ -447,8 +454,8 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
 
                 ds_interp[p_name] = xr.DataArray(
                     p_out,
-                    dims=("alt",),
-                    coords={"alt": ds_interp["alt"].values},
+                    dims=(vertical_interpolation_axis,),
+                    coords={vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].values},
                     attrs={**ds_new[p_name].attrs, "units": "hPa"},
                 )
 
@@ -478,20 +485,20 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
         # Build a temporary bin-mean dataset on the SAME edges/labels as the 'bin' method
         tmp_bin = (
             src.groupby_bins(
-                "alt",
+                vertical_interpolation_axis,
                 interpolation_bins,
                 labels=interpolation_grid,
                 restore_coord_dims=True,
             )
             .mean()  # skipna=True by default
             .transpose()
-            .rename({"alt_bins": "alt"})
+            .rename({f"{vertical_interpolation_axis}_bins": vertical_interpolation_axis})
         )
 
         # Apply per-variable mask: keep values where the tmp_bin mean is non-NaN
         for v in ds_interp.data_vars:
             da = ds_interp[v]
-            if ("alt" in da.dims) and np.issubdtype(da.dtype, np.number) and (v in tmp_bin):
+            if (vertical_interpolation_axis in da.dims) and np.issubdtype(da.dtype, np.number) and (v in tmp_bin):
                 valid = ~np.isnan(tmp_bin[v])
                 ds_interp[v] = da.where(valid)
 
@@ -503,11 +510,531 @@ def interpolation(ds_new, method, interpolation_grid, sounding, variables, cfg):
         raise ValueError(f"Unknown interpolation method: {method}")
 
     return ds_interp
+    
+'''
+#### DEBUGGING Sript that I used with Nina
+############################################
+
+
+def _band_check(ds, axis, vnames, z_lo=17000, z_hi=20000, tag=""):
+    z = np.asarray(ds[axis].values, float)
+    m = (z >= z_lo) & (z <= z_hi)
+    print(f"[BAND {tag}] {z_lo}-{z_hi} m: n_levels={int(m.sum())}")
+    for v in vnames:
+        if v in ds:
+            a = ds[v]
+            if "sounding" in a.dims:
+                a = a.isel(sounding=0)
+            arr = np.asarray(a.values)
+            print(f"[BAND {tag}] NaNs {v}: {int(np.isnan(arr[m]).sum())}")
+
+
+def interpolation(ds_new, method, interpolation_grid, vertical_interpolation_axis, sounding, variables, cfg):
+    """
+    Interpolate/bin Level-2 dataset along GPS altitude 'alt'.
+
+    Parameters
+    ----------
+    ds_new : xr.Dataset
+        Output of prepare_data_for_interpolation(), with 'alt' as vertical dim.
+    method : {"linear","bin"}
+        Interpolation strategy.
+    interpolation_grid : np.ndarray
+        Target altitude grid (centers) in meters.
+    sounding : object
+        Sounding object (for unitregistry etc).
+    variables : iterable[(in_name, out_name)]
+        Variable rename mapping for outputs.
+    cfg : omegaconf.DictConfig
+        Full merged config.
+
+    Returns
+    -------
+    ds_interp : xr.Dataset
+    """
+    
+    if method == "linear":
+        print("[pysonde] Using vertical interpolation method: linear")
+
+        # --- clean & sort only by 'alt' ---
+        ds_sorted = ds_new.sortby(vertical_interpolation_axis)
+        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted[vertical_interpolation_axis]), drop=True)
+
+        # Interpolate on the target alt grid
+        ds_interp = ds_sorted.interp(
+            {vertical_interpolation_axis: interpolation_grid},
+            method="linear"
+            )
+
+        print("pressure before:", ds_sorted.pressure.values)
+        # --- robust log-p interpolation to preserve p(z) profile ---
+        p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
+        if (p_name is not None) and (vertical_interpolation_axis in ds_new.dims or vertical_interpolation_axis in ds_new.coords):
+            p_da = ds_sorted[p_name]
+            z_da = ds_sorted[vertical_interpolation_axis]
+
+            # reduce to 1D along alt if needed
+            if "sounding" in p_da.dims:
+                p_da = p_da.isel(sounding=0)
+            if "sounding" in z_da.dims:
+                z_da = z_da.isel(sounding=0)
+
+            # numeric arrays with units handled
+            p_src = np.asarray(_values_in_unit(p_da, "hPa", default_unit="hPa")).ravel()
+            z_src = np.asarray(_values_in_unit(z_da, "m",   default_unit="m")).ravel()
+
+            mfin = np.isfinite(p_src) & np.isfinite(z_src)
+            p_src, z_src = p_src[mfin], z_src[mfin]
+
+            if z_src.size >= 2:
+                order = np.argsort(z_src)
+                z_src, p_src = z_src[order], p_src[order]
+                z_out = np.asarray(ds_interp[vertical_interpolation_axis].values).ravel()
+
+                # print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
+                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # numeric hPa
+                # print("\np_out:", p_out)
+
+                # --- minimal endpoint fix for p_out without changing mh.pressure_interpolation ---
+                # fill p_out[0] if it's NaN but within the measured span
+                zmin, zmax = z_src[0], z_src[-1]
+                # NOTE: z_src is sorted above
+
+                def _fill_endpoint(z_target, idx_target):
+                    if np.isnan(p_out[idx_target]) and (zmin <= z_target <= zmax):
+                        # find bracketing indices in z_src
+                        j_hi = np.searchsorted(z_src, z_target, side="left")
+                        if 0 < j_hi < len(z_src):
+                            j_lo = j_hi - 1
+                            z1, z2 = z_src[j_lo], z_src[j_hi]
+                            p1, p2 = p_src[j_lo], p_src[j_hi]
+                            if np.isfinite(z1) and np.isfinite(z2) and np.isfinite(p1) and np.isfinite(p2) and (z2 > z1):
+                                # log-linear in pressure vs altitude
+                                lp = np.interp(z_target, [z1, z2], [np.log(p1), np.log(p2)])
+                                p_out[idx_target] = float(np.exp(lp))
+
+                # first bin (usually 0 m)
+                _fill_endpoint(z_out[0], 0)
+                # last bin
+                _fill_endpoint(z_out[-1], -1)
+                # print("\np_out out:", p_out)
+
+                ds_interp[p_name] = xr.DataArray(
+                    p_out,
+                    dims=(vertical_interpolation_axis,),
+                    coords={vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].values},
+                    attrs={**ds_new[p_name].attrs, "units": "hPa"},
+                )
+        # print("pressure after:", ds_interp.pressure.values)
+
+        # --- ensure pressure has Pint units downstream ---
+        p_name = "pressure" if "pressure" in ds_interp else ("p" if "p" in ds_interp else None)
+        if p_name is not None:
+            ds_interp[p_name] = _safe_to(ds_interp[p_name], "hPa", default_unit="hPa")
+        # print("pressure after after:", ds_interp.pressure.values)
+
+        # --- unit harmonization for other variables ---
+        for var_in, var_out in variables:
+            try:
+                ds_interp[var_out] = ds_interp[var_out].pint.quantify(ds_new[var_out].pint.units)
+                ds_interp[var_out] = ds_interp[var_out].pint.to(cfg.level2.variables[var_in].attrs.units)
+            except (KeyError, ValueError, ConfigAttributeError):
+                pass
+
+        # --- guarantee size-1 'sounding' dim (adjust_ds_after_interpolation expects it) ---
+        if "sounding" not in ds_interp.dims:
+            ds_interp = ds_interp.expand_dims({"sounding": 1})
+
+        # --- ensure scalar launch_time present (0-D datetime64[ns]) ---
+        def _first_finite_dt64_scalar(da):
+            """Return first finite datetime64[ns] from a time-like DataArray as 0-D."""
+            # reduce any extra dims (e.g., sounding/alt) by taking the first finite element
+            vals = da.values
+            # to ns int for finite mask
+            ns = vals.astype("datetime64[ns]").astype("int64")
+            m = np.isfinite(ns)
+            if m.any():
+                return xr.DataArray(vals[m][0].astype("datetime64[ns]"), dims=())
+            return None
+
+        lt_scalar = None
+
+        # 1) prefer a scalar 'launch_time' from the input
+        if "launch_time" in ds_new and ds_new["launch_time"].ndim == 0:
+            lt_scalar = xr.DataArray(
+                ds_new["launch_time"].values.astype("datetime64[ns]"), dims=()
+            )
+        # 2) fallback: derive from per-level time variables in the ORIGINAL input
+        elif any(v in ds_new for v in ("flight_time", "time")):
+            for cand in ("flight_time", "time"):
+                if cand in ds_new:
+                    tvar = ds_new[cand]
+                    # drop sounding dim if present
+                    if "sounding" in tvar.dims:
+                        tvar = tvar.isel(sounding=0)
+                    # pick first finite timestamp
+                    lt_scalar = _first_finite_dt64_scalar(tvar)
+                    if lt_scalar is not None:
+                        break
+        # 3) final fallback: dataset attribute
+        if lt_scalar is None and "launch_time" in ds_new.attrs:
+            lt_scalar = xr.DataArray(
+                np.datetime64(ds_new.attrs["launch_time"]).astype("datetime64[ns]"),
+                dims=()
+            )
+
+        if lt_scalar is None:
+            raise ValueError(
+                "Failed to determine a scalar launch_time (looked for scalar 'launch_time', "
+                "or first finite in 'flight_time'/'time', or ds_new.attrs['launch_time'])."
+            )
+
+        ds_interp["launch_time"] = lt_scalar
+
+    elif method == "bin":
+        # --- bin-mean on alt using numeric labels (no pandas.Interval left) ---
+        print("[pysonde] Using vertical interpolation method: bin")
+        interpolation_bins = np.arange(
+            cfg.level2.setup.interpolation_grid_min - cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_max + cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_inc,
+        )
+
+        # Workaround for xarray#6995 (object dtype time issues)
+        if "flight_time" in ds_new:
+            ds_new["flight_time"] = ds_new.flight_time.astype(int)
+
+        # Use labels=interpolation_grid so resulting coord is numeric (bin centers)
+        ds_interp = ds_new.groupby_bins(
+            vertical_interpolation_axis,
+            interpolation_bins,
+            labels=interpolation_grid,
+            restore_coord_dims=True,
+        ).mean()
+
+        ds_interp = ds_interp.transpose()
+        ds_interp = ds_interp.rename({f"{vertical_interpolation_axis}_bins": vertical_interpolation_axis})
+
+        # Create bounds variable (lower, upper] per CF-ish convention
+        ds_interp[f"{vertical_interpolation_axis}_bnds"] = xr.DataArray(
+            np.array([interpolation_bins[:-1], interpolation_bins[1:]]).T,
+            dims=[vertical_interpolation_axis, "nv"],
+            coords={vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].data},
+        )
+
+        # carry launch_time forward
+        if "launch_time" in ds_new:
+            ds_interp["launch_time"] = ds_new["launch_time"]
+
+    elif method == "linear_masked":
+        print("[pysonde] Using vertical interpolation method: linear_masked")
+        print("[INERPOLATION]: I am going to interpolate over:", vertical_interpolation_axis)
+        # --- 1) Do exactly what 'linear' does (preserve flight_time, interp, robust log-p) ---
+
+        print("At the top of linear_masked:")
+        _band_check(ds_new, vertical_interpolation_axis,
+            ["pressure","theta","temperature","specific_humidity"],
+            17000, 20000, tag="post-interp")
+        
+        # drop NaNs & sort by altitude (same as linear)
+        ds_sorted = ds_new.sortby(vertical_interpolation_axis)
+        ds_sorted = ds_sorted.where(np.isfinite(ds_sorted[vertical_interpolation_axis]), drop=True)
+
+        #plt.plot(ds_new[vertical_interpolation_axis])
+        #plt.show()
+
+        # preserve flight_time across interpolation (datetime -> int64 ns -> datetime)
+        if "flight_time" in ds_sorted.variables and (vertical_interpolation_axis in ds_sorted["flight_time"].dims):
+            print("[flight_time]: datetime -> int64 ns -> datetime")
+            ds_lin = ds_sorted.copy()
+            ds_lin["flight_time_ns"] = ds_lin["flight_time"].astype("datetime64[ns]").astype("int64")
+            ds_lin = ds_lin.drop_vars("flight_time")
+
+            # pre-fill internal NaNs along alt so .interp doesn't propagate gaps
+            print(f"{vertical_interpolation_axis}")
+            #ds_lin[f"{vertical_interpolation_axis}"].plot()
+            #plt.show()
+
+            ds_filled = ds_lin.interpolate_na(dim=vertical_interpolation_axis, method="linear", use_coordinate=True)
+            #ds_filled.temperature.plot(y=vertical_interpolation_axis)
+            #plt.show()
+
+            ds_interp = ds_filled.interp(
+                {vertical_interpolation_axis: interpolation_grid},
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+
+            #ds_interp.temperature.plot(y=vertical_interpolation_axis)
+            #plt.show()
+
+
+            # convert back to datetime64 and restore the original name
+            ds_interp["flight_time"] = ds_interp["flight_time_ns"].astype("datetime64[ns]")
+            ds_interp = ds_interp.drop_vars("flight_time_ns")
+        else:
+            print("[flight_time: was fine already")
+            ds_filled = ds_sorted.interpolate_na(dim=vertical_interpolation_axis, method="linear", use_coordinate=True)
+            ds_interp = ds_filled.interp(
+                {vertical_interpolation_axis: interpolation_grid},
+                method="linear",
+                kwargs={"fill_value": "extrapolate"},
+            )
+            
+        print("After interp in linear_masked:")
+        _band_check(ds_interp, vertical_interpolation_axis,
+            ["pressure","theta","temperature","specific_humidity"],
+            17000, 20000, tag="post-interp")
+        
+        #plt.plot(ds_sorted[vertical_interpolation_axis])
+        #plt.show()
+
+        # --- robust log-p interpolation to preserve p(z) profile (aligned with 'linear') ---
+        p_name = "pressure" if "pressure" in ds_new else ("p" if "p" in ds_new else None)
+        if (p_name is not None) and (vertical_interpolation_axis in ds_new.dims or vertical_interpolation_axis in ds_new.coords):
+            print("Popop pipipi")
+
+            #print(ds_sorted)
+            p_da = ds_sorted[p_name]
+            z_da = ds_sorted[vertical_interpolation_axis]
+
+            #z_da.plot()
+            #plt.show()
+
+            # reduce to 1D along alt if needed
+            if "sounding" in p_da.dims:
+                p_da = p_da.isel(sounding=0)
+            if "sounding" in z_da.dims:
+                z_da = z_da.isel(sounding=0)
+
+            # numeric arrays with units handled
+            p_src = np.asarray(_values_in_unit(p_da, "hPa", default_unit="hPa")).ravel()
+            z_src = np.asarray(_values_in_unit(z_da, "m",   default_unit="m")).ravel()
+
+            #(z_src, p_src)
+            #plt.show()
+            #plt.plot(z_da, marker='o', linestyle=None)
+            #plt.show()
+
+            # numeric + positive pressure for log space
+            mfin = np.isfinite(p_src) & np.isfinite(z_src) & (p_src > 0)
+            p_src, z_src = p_src[mfin], z_src[mfin]
+
+            if z_src.size >= 2:
+                order = np.argsort(z_src)
+                z_src, p_src = z_src[order], p_src[order]
+                z_out = np.asarray(ds_interp[vertical_interpolation_axis].values).ravel()
+
+                # DEBUG prints (optional)
+                # print("\nz_src:", z_src)
+                # print("\np_src:", p_src)
+                # print("\nz_out:", z_out)
+                # print(f"[pysonde] log-p inputs: p_src={p_src.shape}, z_src={z_src.shape}, z_out={z_out.shape}")
+
+
+                p_out = mh.pressure_interpolation(p_src, z_src, z_out)  # numeric hPa
+
+                #plt.plot(z_src, marker='o', linestyle=None)
+                #plt.show()
+
+                # --- DIAGNOSTICS for pressure interpolation ---
+                # --- DIAGNOSTICS for pressure interpolation ---
+                print("[P-DBG] inputs:",
+                    f"p_src.shape={p_src.shape}, z_src.shape={z_src.shape}")
+                print("[P-DBG] finite counts:", 
+                    f"p={np.isfinite(p_src).sum()}/{p_src.size}",
+                    f"z={np.isfinite(z_src).sum()}/{z_src.size}")
+
+                # monotonicity / duplicates in z_src (required by many log-p routines)
+                dz = np.diff(z_src)
+                print("[P-DBG] z_src strictly inc?:", bool(np.all(dz > 0)),
+                    " nondecreasing?:", bool(np.all(dz >= 0)),
+                    " duplicates:", int(np.sum(dz == 0)))
+
+                # coverage of z_out vs z_src
+                zmin_p, zmax_p = float(z_src[0]), float(z_src[-1])
+                z_out = np.asarray(ds_interp[vertical_interpolation_axis].values).ravel()
+                inside = (z_out >= zmin_p) & (z_out <= zmax_p)
+                print("[P-DBG] z_out inside pressure-span:",
+                    int(inside.sum()), "/", z_out.size, 
+                    f"span=({zmin_p:.1f},{zmax_p:.1f}) out_min={np.nanmin(z_out):.1f} out_max={np.nanmax(z_out):.1f}\n")
+                # --- DIAGNOSTICS for pressure interpolation ---
+                # --- DIAGNOSTICS for pressure interpolation ---
+
+
+
+                # --- minimal endpoint fix for p_out without changing mh.pressure_interpolation ---
+                # fill endpoints if they are NaN but lie within the measured span
+                zmin, zmax = z_src[0], z_src[-1]  # z_src is sorted above
+
+                def _fill_endpoint(z_target, idx_target):
+                    if np.isnan(p_out[idx_target]) and (zmin <= z_target <= zmax):
+                        # find bracketing indices in z_src
+                        j_hi = np.searchsorted(z_src, z_target, side="left")
+                        if 0 < j_hi < len(z_src):
+                            j_lo = j_hi - 1
+                            z1, z2 = z_src[j_lo], z_src[j_hi]
+                            p1, p2 = p_src[j_lo], p_src[j_hi]
+                            if np.isfinite(z1) and np.isfinite(z2) and np.isfinite(p1) and np.isfinite(p2) and (z2 > z1):
+                                # log-linear interpolation in pressure vs altitude
+                                lp = np.interp(z_target, [z1, z2], [np.log(p1), np.log(p2)])
+                                p_out[idx_target] = float(np.exp(lp))
+
+                # first bin (often 0 m)
+                _fill_endpoint(z_out[0], 0)
+                # last bin
+                _fill_endpoint(z_out[-1], -1)
+
+                # DEBUG print (optional)
+                # print("\np_out (after endpoint fix):", p_out)
+
+                #p_out.plot()
+                #plt.show()
+
+                ds_interp[p_name] = xr.DataArray(
+                    p_out,
+                    dims=(vertical_interpolation_axis,),
+                    coords={vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].values},
+                    attrs={**ds_new[p_name].attrs, "units": "hPa"},
+                )
+
+        #ds_interp[vertical_interpolation_axis].plot()
+        #plt.show()
+
+        # --- ensure pressure has Pint units downstream ---
+        p_name = "pressure" if "pressure" in ds_interp else ("p" if "p" in ds_interp else None)
+        if p_name is not None:
+            ds_interp[p_name] = _safe_to(ds_interp[p_name], "hPa", default_unit="hPa")
 
 
 
 
-def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
+
+        print("After log-p interp in linear_masked:")
+        _band_check(ds_interp, vertical_interpolation_axis,
+            ["pressure","theta","temperature","specific_humidity"],
+            17000, 20000, tag="post-interp")
+        
+        # --- 2) Build per-variable occupancy mask from a temporary bin-mean (to match 'bin' exactly) ---
+
+        interpolation_bins = np.arange(
+            cfg.level2.setup.interpolation_grid_min - cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_max + cfg.level2.setup.interpolation_grid_inc / 2,
+            cfg.level2.setup.interpolation_grid_inc,
+        )
+
+        axis = vertical_interpolation_axis
+
+        # Use the same source and quirks as the 'bin' branch
+        src = ds_new
+        if "sounding" in src.dims and src.sizes["sounding"] > 1:
+            src = src.isel(sounding=0)
+
+        # Workaround for object dtype times (same as in bin path)
+        if "flight_time" in src:
+            src = src.copy()
+            src["flight_time"] = src["flight_time"].astype(int)
+
+        # Build a temporary bin-mean dataset on the SAME edges/labels as the 'bin' method
+        tmp_bin = (
+            src.groupby_bins(
+                axis,
+                interpolation_bins,
+                labels=interpolation_grid,
+                restore_coord_dims=True,
+            )
+            .mean()  # skipna=True by default
+            .transpose()
+            .rename({f"{axis}_bins": axis})
+        )
+
+        # NEW: a pure occupancy (counts) vector by *axis only* (independent of any variable NaNs)
+        occ = (
+            src[axis]
+            .groupby_bins(axis, interpolation_bins, labels=interpolation_grid, restore_coord_dims=False)
+            .count()
+            .rename({f"{axis}_bins": axis})
+        )
+
+        # ---------------------- DIAGNOSTICS ----------------------
+        band = slice(17000, 20000)
+        occ_band = occ.sel({axis: band})
+        zero_occ = (occ_band == 0)
+        print("[MASK-DBG] occ zeros in 17–20 km:", int(zero_occ.sum().item()))
+        if int(zero_occ.sum().item()) > 0:
+            zeros_at = occ_band.where(zero_occ, drop=True)[axis].values
+            print("[MASK-DBG] first zero-occ heights in band:", zeros_at[:10])
+
+        for probe in ["pressure", "theta", "temperature", "specific_humidity"]:
+            if probe in tmp_bin:
+                tb = tmp_bin[probe].sel({axis: band})
+                n_nans = int(np.isnan(tb.values).sum())
+                print(f"[MASK-DBG] tmp_bin[{probe}] NaN bins in 17–20 km:", n_nans)
+        # ---------------------------------------------------------
+
+        # Apply per-variable mask
+        for v in list(ds_interp.data_vars):
+            da = ds_interp[v]
+            if not ((axis in da.dims) and np.issubdtype(da.dtype, np.number)):
+                continue
+
+            # choose mask mode
+            if v in ("pressure", "p"):
+                if v in tmp_bin:
+                    valid = ~np.isnan(tmp_bin[v])
+                    mode = "pressure-strict(tmp_bin)"
+                else:
+                    valid = (occ.fillna(0) > 0)
+                    mode = "pressure-occupancy"
+            else:
+                # >>> THIS is the key change: occupancy (axis) only for non-pressure <<<
+                valid = (occ.fillna(0) > 0)
+                mode = "occupancy-only"
+
+            # restrict to observed span too (optional but nice)
+            z = ds_interp[axis]
+            zmin = float(np.nanmin(src[axis].values))
+            zmax = float(np.nanmax(src[axis].values))
+            within_span = (z >= zmin) & (z <= zmax)
+            valid = valid & within_span
+
+            # DIAG: alignment & counts
+            try:
+                vb = valid.sel({axis: slice(17000, 20000)})
+                n_drop_band = int((~vb).sum().item())
+                n_keep_band = int(vb.sum().item())
+            except Exception:
+                n_drop_band = n_keep_band = -1
+
+            print(f"[MASK-DBG] mode for {v}: {mode}; "
+                f"keep={n_keep_band} drop={n_drop_band} in 17–20 km")
+
+            ds_interp[v] = da.where(valid)
+
+
+        # carry launch_time if present
+        if "launch_time" in ds_new:
+            ds_interp["launch_time"] = ds_new["launch_time"]
+
+        print("After masking in linear_masked:")
+        _band_check(ds_interp, axis,
+                    ["pressure","theta","temperature","specific_humidity"],
+                    17000, 20000, tag="post-interp")
+
+
+
+
+
+
+    else:
+        raise ValueError(f"Unknown interpolation method: {method}")
+
+    return ds_interp
+
+
+'''
+
+def adjust_ds_after_interpolation(ds_interp, ds, ds_input, vertical_interpolation_axis, variables, cfg):
     """
     Final adjustments to the interpolated sounding dataset.
 
@@ -546,10 +1073,16 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
     - Temperature and RH are recalculated from interpolated theta and specific humidity.
     - Unit handling is performed using `pint` via `xarray` integration.
     """
-    dims_2d = ["sounding", "alt"]
-    dims_1d = ["alt"]
+    dims_2d = ["sounding", vertical_interpolation_axis]
+    dims_1d = [vertical_interpolation_axis]
     ureg = ds["lat"].pint.units._REGISTRY
-    coords_1d = {"alt": ds_interp.alt.pint.quantify("m", unit_registry=ureg)}
+    coords_1d = {vertical_interpolation_axis: ds_interp[vertical_interpolation_axis].pint.quantify("m", unit_registry=ureg)}
+
+    axis_coord = ds_interp[vertical_interpolation_axis]
+    if "sounding" in axis_coord.dims:
+        axis_coord = axis_coord.isel(sounding=0)
+    axis_coord = axis_coord.pint.quantify("m", unit_registry=ureg)
+    coords_1d = {vertical_interpolation_axis: axis_coord}
 
     wind_u = ds_interp.isel({"sounding": 0})["wind_u"]
     wind_v = ds_interp.isel({"sounding": 0})["wind_v"]
@@ -563,6 +1096,7 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
     )
 
     if "alt_WGS84" in ds.keys():
+        print("yes, alt_WGS84 is still here")
         ecef = pyproj.Proj(proj="geocent", ellps="WGS84", datum="WGS84")
         lla = pyproj.Proj(proj="latlong", ellps="WGS84", datum="WGS84")
         lon, lat, alt = pyproj.transform(
@@ -591,8 +1125,10 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
         del ds_interp["y"]
         del ds_interp["z"]
         del ds_interp["alt_WGS84"]
+    else:
+        print("no, alt_WGS84 is gone")
 
-    ds_input = ds_input.sortby("alt")
+    ds_input = ds_input.sortby(vertical_interpolation_axis)
     ds_input.alt.load()
     ds_input.p.load()
     ds_input = ds_input.reset_coords()
@@ -622,9 +1158,9 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
 
     ds_interp["temperature"] = ds_interp["temperature"].expand_dims({"sounding": 1})
 
-    w = (ds_interp.isel(sounding=0)["specific_humidity"]) / (
-        1 - ds_interp.isel(sounding=0)["specific_humidity"]
-    )
+    q = ds_interp.isel(sounding=0)["specific_humidity"]
+    w = q / (1 - q)
+
     e_s = td.calc_saturation_pressure(ds_interp.isel(sounding=0)["temperature"], method="wagner_pruss")
     w_s = td.calc_wv_mixing_ratio(ds_interp.isel(sounding=0), e_s)
     #w_s = mpcalc.mixing_ratio(e_s, ds_interp.isel(sounding=0)["pressure"].data)
@@ -649,19 +1185,14 @@ def adjust_ds_after_interpolation(ds_interp, ds, ds_input, variables, cfg):
     ds_interp["dewpoint"] = xr.DataArray(dewpoint.data, dims=dims_1d, coords=coords_1d)
     ds_interp["dewpoint"] = ds_interp["dewpoint"].expand_dims({"sounding": 1})
     ds_interp["dewpoint"].data = ds_interp["dewpoint"].data * units.K
-    # ds_interp = ds_interp.drop('dew_point')
-
-    # ds_interp = ds_interp.drop('altitude')
-
     ds_interp["mixing_ratio"].data = ds_interp["mixing_ratio"].data * units("g/g")
     ds_interp["specific_humidity"].data = ds_interp["specific_humidity"].data * units(
         "g/g"
     )
-
     return ds_interp
 
 
-def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation_grid):
+def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation_grid, vertical_interpolation_axis):
     """
     Count the number of original measurements within each vertical interpolation bin 
     and flag how each interpolated value was obtained.
@@ -712,12 +1243,12 @@ def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation
     )
 
     # Count number of measurements within each bin
-    dims_2d = ["sounding", "alt"]
-    coords_1d = {"alt": ds_interp.alt}
+    dims_2d = ["sounding", f"{vertical_interpolation_axis}"]
+    coords_1d = {f"{vertical_interpolation_axis}": ds_interp[vertical_interpolation_axis]}
 
     ds_interp["N_ptu"] = xr.DataArray(
         ds_new.pressure.groupby_bins(
-            "alt",
+            f"{vertical_interpolation_axis}",
             interpolation_bins,
             labels=interpolation_grid,
             restore_coord_dims=True,
@@ -729,7 +1260,7 @@ def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation
     )
     ds_interp["N_gps"] = xr.DataArray(
         ds_new.latitude.groupby_bins(
-            "alt",
+            f"{vertical_interpolation_axis}",
             interpolation_bins,
             labels=interpolation_grid,
             restore_coord_dims=True,
@@ -764,7 +1295,7 @@ def count_number_of_measurement_within_bin(ds_interp, ds_new, cfg, interpolation
     return ds_interp
 
 
-def finalize_attrs(ds_interp, ds, cfg, file, variables):
+def finalize_attrs(ds_interp, ds, cfg, file, variables, vertical_interpolation_axis):
     """
     Finalize metadata and attributes of the interpolated sounding dataset.
 
@@ -866,7 +1397,7 @@ def finalize_attrs(ds_interp, ds, cfg, file, variables):
 
     # Transpose dataset if necessary
     for variable in ds_interp.data_vars:
-        if variable == "alt_bnds":
+        if variable == f"{vertical_interpolation_axis}_bnds":
             continue
         dims = ds_interp[variable].dims
         if (len(dims) == 2) and (dims[0] != "sounding"):

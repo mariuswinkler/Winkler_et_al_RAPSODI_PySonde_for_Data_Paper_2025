@@ -70,11 +70,12 @@ variables:
             - sounding
             - level
         internal_varname : "pressure"
-    height_ptu:
+    height:
         attrs:
             standard_name: "geopotential_height"
             long_name: "geopotential height retrieved from PTU"
             units: "m"
+            coordinates: "launch_time flight_time lon lat p"
         encodings:
             dtype: "float32"
         coordinates:
