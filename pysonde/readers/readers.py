@@ -96,6 +96,34 @@ class MW41(Level0):
             sounding_meta_dict, self.variable_name_mapping
         )
 
+        # Physical-range QC on *numeric* columns (before units are attached!)
+        if "pressure" in pd_snd:
+            n_bad = (pd_snd["pressure"] <= 0).sum()
+            if n_bad > 0:
+                print(f"[QC] Pressure <= 0 hPa: {n_bad} values set to NaN")
+            pd_snd.loc[pd_snd["pressure"] <= 0, "pressure"] = np.nan
+
+        if "humidity" in pd_snd:
+            mask_bad = (pd_snd["humidity"] < 0) | (pd_snd["humidity"] > 100)
+            n_bad = mask_bad.sum()
+            if n_bad > 0:
+                print(f"[QC] Humidity outside 0–100%: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "humidity"] = np.nan
+
+        if "temperature" in pd_snd:
+            mask_bad = (pd_snd["temperature"] < 150) | (pd_snd["temperature"] > 330)
+            n_bad = mask_bad.sum()
+            if n_bad > 0:
+                print(f"[QC] Temperature outside 150–330 K: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "temperature"] = np.nan
+
+        if "wind_speed" in pd_snd:
+            mask_bad = (pd_snd["wind_speed"] < 0) | (pd_snd["wind_speed"] > 150)
+            n_bad = mask_bad.sum()
+            if n_bad > 0:
+                print(f"[QC] Wind speed outside 0–150 m/s: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "wind_speed"] = np.nan
+
         # Attach units where provided
         pd_snd = rh.attach_units(pd_snd, self.units, self.unitregistry)
 
@@ -222,6 +250,37 @@ class METEOMODEM(Level0):
 
         # Rename variables
         pd_snd = rh.rename_variables(pd_snd, self.variable_name_mapping)
+
+        # Physical-range QC on *numeric* columns (before units are attached!)
+        if "pressure" in pd_snd:
+            mask_bad = pd_snd["pressure"] <= 0          # hPa
+            n_bad = int(mask_bad.sum())
+            if n_bad > 0:
+                print(f"[QC] Pressure <= 0 hPa: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "pressure"] = np.nan
+
+        if "humidity" in pd_snd:
+            mask_bad = (pd_snd["humidity"] < 0) | (pd_snd["humidity"] > 100)  # %
+            n_bad = int(mask_bad.sum())
+            if n_bad > 0:
+                print(f"[QC] Humidity outside 0–100%: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "humidity"] = np.nan
+
+        if "temperature" in pd_snd:
+            # Meteomodem .cor: temperature is in °C (typical radiosonde range ~[-90, 60] °C)
+            mask_bad = (pd_snd["temperature"] < -90) | (pd_snd["temperature"] > 60)  # °C
+            n_bad = int(mask_bad.sum())
+            if n_bad > 0:
+                print(f"[QC] Temperature outside -90–60 °C: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "temperature"] = np.nan
+
+        if "wind_speed" in pd_snd:
+            mask_bad = (pd_snd["wind_speed"] < 0) | (pd_snd["wind_speed"] > 150)  # m/s
+            n_bad = int(mask_bad.sum())
+            if n_bad > 0:
+                print(f"[QC] Wind speed outside 0–150 m/s: {n_bad} values set to NaN")
+            pd_snd.loc[mask_bad, "wind_speed"] = np.nan
+
 
         # Convert radians to degree
         pd_snd["latitude"] = np.rad2deg(pd_snd["latitude"])
